@@ -14,6 +14,22 @@ export interface SyncLogEntry {
 export class SheetsWriter {
   constructor(private readonly client: SheetsClient) {}
 
+  async loadExistingKeys(spreadsheetId: string, tabName: string): Promise<Set<string>> {
+    const keys = new Set<string>();
+    try {
+      const rows = await this.client.getRange(spreadsheetId, `'${tabName}'!A:G`);
+      for (const row of rows.slice(1)) {
+        const artworkName = row[0] ?? '';
+        const permalink = row[6] ?? '';
+        if (artworkName && permalink) keys.add(`${artworkName}|${permalink}`);
+      }
+      logger.info({ count: keys.size }, 'Loaded existing permalink keys');
+    } catch {
+      // 탭이 없거나 비어있으면 빈 Set 반환
+    }
+    return keys;
+  }
+
   async ensureHeader(spreadsheetId: string, tabName: string): Promise<void> {
     const range = `'${tabName}'!A1:G1`;
     const existing = await this.client.getRange(spreadsheetId, range);

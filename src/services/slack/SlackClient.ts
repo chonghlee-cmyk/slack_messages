@@ -71,10 +71,6 @@ export class SlackClient {
     return (await this.getUserInfo(userId)).shortName;
   }
 
-  async getUserFullLabel(userId: string): Promise<string> {
-    return (await this.getUserInfo(userId)).fullLabel;
-  }
-
   private async getUserInfo(userId: string): Promise<{ shortName: string; fullLabel: string }> {
     if (this.userCache.has(userId)) return this.userCache.get(userId)!;
 

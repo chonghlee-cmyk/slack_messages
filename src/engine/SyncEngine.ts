@@ -32,6 +32,7 @@ export class SyncEngine {
   private sheetsWriter: SheetsWriter;
   private stateLock = false;
   private stateLockQueue: Array<() => void> = [];
+  private existingKeys: Set<string> = new Set();
 
   constructor(private readonly config: EngineConfig) {
     this.slackClient = new SlackClient(config.slackToken);
@@ -55,6 +56,7 @@ export class SyncEngine {
     const collector = new SlackCollector(this.slackClient, normalizer);
 
     await this.sheetsWriter.ensureHeader(this.config.spreadsheetId, this.config.outputTab);
+    this.existingKeys = await this.sheetsWriter.loadExistingKeys(this.config.spreadsheetId, this.config.outputTab);
 
     const artworks = await this.sheetsReader.readArtworks(
       this.config.spreadsheetId,
@@ -92,7 +94,7 @@ export class SyncEngine {
 
         let afterDate: Date | undefined;
         if (!options.forceFullSync && artworkState?.lastSyncedAt) {
-          afterDate = new Date(artworkState.lastSyncedAt);
+          afterDate = subtractDays(new Date(artworkState.lastSyncedAt), 1); // 1일 여유
         } else if (!options.forceFullSync) {
           afterDate = subtractDays(new Date(), options.initialLookbackDays);
         }
@@ -106,18 +108,32 @@ export class SyncEngine {
             afterDate,
           });
 
-          if (result.messages.length > 0 || result.replies.length > 0) {
+          // dedup: 작품명 + permalink 기준 (동기적으로 체크 후 set에 추가)
+          const newMessages = result.messages.filter(m => {
+            const key = `${m.artworkName}|${m.permalink}`;
+            if (this.existingKeys.has(key)) return false;
+            this.existingKeys.add(key);
+            return true;
+          });
+          const newReplies = result.replies.filter(r => {
+            const key = `${r.artworkName}|${r.permalink ?? ''}`;
+            if (this.existingKeys.has(key)) return false;
+            this.existingKeys.add(key);
+            return true;
+          });
+
+          if (newMessages.length > 0 || newReplies.length > 0) {
             await this.sheetsWriter.appendRows(
               this.config.spreadsheetId,
               this.config.outputTab,
-              options.dryRun ? [] : result.messages,
-              options.dryRun ? [] : result.replies
+              options.dryRun ? [] : newMessages,
+              options.dryRun ? [] : newReplies
             );
-            totalMessages += result.messages.length;
-            totalReplies += result.replies.length;
+            totalMessages += newMessages.length;
+            totalReplies += newReplies.length;
             newArtworks.push(artwork.name);
             logger.info(
-              { artwork: artwork.name, messages: result.messages.length, replies: result.replies.length },
+              { artwork: artwork.name, messages: newMessages.length, replies: newReplies.length },
               'Artwork sync done'
             );
           } else {
@@ -127,8 +143,8 @@ export class SyncEngine {
           syncState[artwork.name] = {
             lastSyncedAt: new Date().toISOString(),
             status: 'completed',
-            totalMessages: (artworkState?.totalMessages ?? 0) + result.messages.length,
-            totalReplies: (artworkState?.totalReplies ?? 0) + result.replies.length,
+            totalMessages: (artworkState?.totalMessages ?? 0) + newMessages.length,
+            totalReplies: (artworkState?.totalReplies ?? 0) + newReplies.length,
           };
           await this.saveSyncStateLocked(syncState);
           successCount++;

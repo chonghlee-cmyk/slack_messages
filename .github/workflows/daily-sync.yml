@@ -48,7 +48,8 @@ jobs:
           GOOGLE_SHEETS_ARTWORK_TAB: ${{ vars.GOOGLE_SHEETS_ARTWORK_TAB }}
           GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB }}
           GOOGLE_SHEETS_LOG_TAB: ${{ vars.GOOGLE_SHEETS_LOG_TAB }}
-          SYNC_CONCURRENCY: '3'
+          GOOGLE_SHEETS_ARTWORK_NAME_COLUMN: ${{ vars.GOOGLE_SHEETS_ARTWORK_NAME_COLUMN || '0' }}
+          SYNC_CONCURRENCY: ${{ vars.SYNC_CONCURRENCY || '3' }}
           FORCE_FULL_SYNC: ${{ inputs.force_full_sync || 'false' }}
           ARTWORK_FILTER: ${{ inputs.artwork_filter }}
           LOG_FORMAT: json
