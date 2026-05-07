@@ -48,14 +48,36 @@ export class SheetsClient {
     });
   }
 
+  private async withRetry<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const isQuota =
+          err?.code === 429 ||
+          err?.status === 429 ||
+          (err?.message ?? '').includes('Quota exceeded') ||
+          (err?.message ?? '').includes('RESOURCE_EXHAUSTED');
+
+        if (isQuota && attempt < maxRetries) {
+          const waitMs = Math.min(1000 * 2 ** attempt, 64000) + Math.floor(Math.random() * 1000);
+          logger.warn({ attempt, waitMs }, 'Sheets quota exceeded — retrying');
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('Sheets: max retries exceeded');
+  }
+
   async getRange(spreadsheetId: string, range: string): Promise<string[][]> {
     const sheets = await this.getSheets();
     logger.debug({ spreadsheetId, range }, 'Sheets getRange');
 
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range,
-    });
+    const response = await this.withRetry(() =>
+      sheets.spreadsheets.values.get({ spreadsheetId, range })
+    );
 
     return (response.data.values as string[][] | null | undefined) ?? [];
   }
@@ -68,13 +90,15 @@ export class SheetsClient {
     const sheets = await this.getSheets();
     logger.debug({ spreadsheetId, range, rowCount: values.length }, 'Sheets appendRows');
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range,
-      valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values },
-    });
+    await this.withRetry(() =>
+      sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range,
+        valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values },
+      })
+    );
   }
 
   async updateRange(
@@ -85,16 +109,20 @@ export class SheetsClient {
     const sheets = await this.getSheets();
     logger.debug({ spreadsheetId, range, rowCount: values.length }, 'Sheets updateRange');
 
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values },
-    });
+    await this.withRetry(() =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values },
+      })
+    );
   }
 
   async clearRange(spreadsheetId: string, range: string): Promise<void> {
     const sheets = await this.getSheets();
-    await sheets.spreadsheets.values.clear({ spreadsheetId, range });
+    await this.withRetry(() =>
+      sheets.spreadsheets.values.clear({ spreadsheetId, range })
+    );
   }
 }
