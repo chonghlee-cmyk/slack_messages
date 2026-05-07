@@ -1,0 +1,55 @@
+name: Daily Slack Sync
+
+on:
+  schedule:
+    - cron: '0 17 * * *'   # 매일 KST 새벽 2시 (UTC 17:00)
+  workflow_dispatch:         # 수동 트리거
+    inputs:
+      artwork_filter:
+        description: '특정 작품명 (비우면 전체)'
+        required: false
+      force_full_sync:
+        description: '전체 재수집 여부 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore sync state
+        uses: actions/cache@v4
+        with:
+          path: data/sync-state.json
+          key: sync-state-${{ github.run_id }}
+          restore-keys: |
+            sync-state-
+
+      - name: Run sync
+        run: npx ts-node src/jobs/incrementalSync.ts
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_TARGET_CHANNEL_IDS: ${{ secrets.SLACK_TARGET_CHANNEL_IDS }}
+          SLACK_EXCLUDED_USER_IDS: ${{ secrets.SLACK_EXCLUDED_USER_IDS }}
+          GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_ARTWORK_TAB: ${{ vars.GOOGLE_SHEETS_ARTWORK_TAB }}
+          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB }}
+          GOOGLE_SHEETS_LOG_TAB: ${{ vars.GOOGLE_SHEETS_LOG_TAB }}
+          SYNC_CONCURRENCY: '3'
+          FORCE_FULL_SYNC: ${{ inputs.force_full_sync || 'false' }}
+          ARTWORK_FILTER: ${{ inputs.artwork_filter }}
+          LOG_FORMAT: json
+          NODE_ENV: production

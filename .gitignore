@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+secrets/
+*.local
+
+# 로그
+*.log
+logs/
+
+# sync state
+data/
+
+# OS
+.DS_Store
+Thumbs.db

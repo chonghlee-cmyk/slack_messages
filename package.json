@@ -1,0 +1,33 @@
+{
+  "name": "slack-collector",
+  "version": "1.0.0",
+  "description": "Slack 메시지 수집 시스템 — Node.js/TypeScript",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "ts-node src/index.ts",
+    "job:incremental": "ts-node src/jobs/incrementalSync.ts",
+    "job:full": "ts-node src/jobs/fullSync.ts",
+    "job:artwork-refresh": "ts-node src/jobs/artworkRefresh.ts",
+    "script:test-sheets": "ts-node scripts/testSheets.ts",
+    "script:test-slack": "ts-node scripts/testSlack.ts",
+    "script:test-connection": "ts-node scripts/testConnection.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.3.4",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "node-emoji": "^1.11.0",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/node-emoji": "^1.8.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
