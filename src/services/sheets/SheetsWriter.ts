@@ -85,7 +85,7 @@ export class SheetsWriter {
     const hh = String(kstDate.getHours()).padStart(2, '0');
     const min = String(kstDate.getMinutes()).padStart(2, '0');
     const ss = String(kstDate.getSeconds()).padStart(2, '0');
-    const date = `${yyyy}-${dd}-${mm}`;
+    const date = `${yyyy}-${mm}-${dd}`;
     const time = `${hh}:${min}:${ss}`;
 
     await this.client.appendRows(spreadsheetId, `'${logTabName}'`, [[
