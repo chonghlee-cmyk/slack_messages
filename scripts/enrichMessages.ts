@@ -24,8 +24,8 @@ import * as path from 'path';
 
 const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json');
 const BATCH_SIZE = 100;
-const RPM = 15;
-const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 200;
+const RPM = 10;                                          // gemini-2.5-flash 무료 티어 실제 한도
+const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;  // 6.5초 간격
 
 const args = process.argv.slice(2);
 const LIMIT = args.find(a => a.startsWith('--limit='))?.split('=')[1];
@@ -180,7 +180,7 @@ function saveProgress(p: Record<number, Enrichment>) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p));
 }
 
-async function callGemini(model: any, batch: Item[]): Promise<Map<number, RawExtraction>> {
+async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Map<number, RawExtraction>> {
   const lines = batch.map((it, i) => {
     const role = it.isReply ? '답글' : '메시지';
     const parent = it.parentText ? ` [부모: ${it.parentText.slice(0, 100)}]` : '';
@@ -188,25 +188,42 @@ async function callGemini(model: any, batch: Item[]): Promise<Map<number, RawExt
   });
 
   const prompt = PROMPT_HEADER + lines.join('\n');
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
 
-  const m = text.match(/\[[\s\S]*\]/);
-  if (!m) throw new Error(`No JSON: ${text.slice(0, 200)}`);
-  const parsed = JSON.parse(m[0]);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      const m = text.match(/\[[\s\S]*\]/);
+      if (!m) throw new Error(`No JSON: ${text.slice(0, 200)}`);
+      const parsed = JSON.parse(m[0]);
 
-  const out = new Map<number, RawExtraction>();
-  for (const p of parsed) {
-    const it = batch[(p.i ?? 0) - 1];
-    if (!it) continue;
-    out.set(it.rowIdx, {
-      category: p.c ?? null,
-      subCategory: p.sc ?? null,
-      titleNumberRaw: p.tn ?? null,
-      titleNameRaw: p.name ?? null,
-    });
+      const out = new Map<number, RawExtraction>();
+      for (const p of parsed) {
+        const it = batch[(p.i ?? 0) - 1];
+        if (!it) continue;
+        out.set(it.rowIdx, {
+          category: p.c ?? null,
+          subCategory: p.sc ?? null,
+          titleNumberRaw: p.tn ?? null,
+          titleNameRaw: p.name ?? null,
+        });
+      }
+      return out;
+    } catch (e: any) {
+      const isQuota = e?.status === 429 || (e?.message ?? '').includes('429') ||
+        (e?.message ?? '').includes('quota') || (e?.message ?? '').includes('RESOURCE_EXHAUSTED');
+      if (attempt < maxRetries) {
+        const waitMs = isQuota
+          ? (attempt + 1) * 30_000   // 할당량 초과: 30초씩 증가
+          : Math.min(1000 * 2 ** attempt, 16_000);  // 일반 오류: 지수 백오프
+        console.error(`\n  Gemini 오류 (시도 ${attempt + 1}/${maxRetries + 1}): ${e.message?.slice(0, 80)} → ${waitMs / 1000}초 대기`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw e;
+    }
   }
-  return out;
+  throw new Error('callGemini: max retries exceeded');
 }
 
 function loadGoogleCredentials() {
