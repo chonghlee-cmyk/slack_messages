@@ -21,6 +21,10 @@ on:
         description: 'AI 분류 스킵 (true/false)'
         required: false
         default: 'false'
+      skip_supabase_sync:
+        description: 'Supabase 동기화 스킵 (true/false)'
+        required: false
+        default: 'false'
 
 jobs:
   pipeline:
@@ -90,6 +94,20 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
           GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
+          LOG_FORMAT: json
+          NODE_ENV: production
+
+      # === 4단계: Google Sheets → Supabase DB ===
+      - name: Step 4 - Sync Sheets to Supabase
+        if: ${{ inputs.skip_supabase_sync != 'true' }}
+        continue-on-error: true
+        run: npx ts-node scripts/syncToSupabase.ts
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           LOG_FORMAT: json
           NODE_ENV: production
 
