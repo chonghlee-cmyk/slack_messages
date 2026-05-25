@@ -1,5 +1,7 @@
 # 📡 Slack HUB
 
+🌏 **한국어** | [English](./ARCHITECTURE.en.md)
+
 > Slack 채널의 메시지를 자동으로 정리해서 Google Sheets에 모아주는 시스템
 
 ---
