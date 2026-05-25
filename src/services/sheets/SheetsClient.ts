@@ -82,6 +82,33 @@ export class SheetsClient {
     return (response.data.values as string[][] | null | undefined) ?? [];
   }
 
+  /**
+   * 큰 범위를 청크로 안전하게 읽기 (예: 'Slack'!A:L → 5000행씩)
+   * tabName 기반으로 행 청크를 만들어 GA 환경에서도 안정적
+   */
+  async getRangeChunked(
+    spreadsheetId: string,
+    tabName: string,
+    columns: string,                // 예: 'A:L'
+    chunkSize: number = 5000
+  ): Promise<string[][]> {
+    const all: string[][] = [];
+    let startRow = 1;
+    while (true) {
+      const endRow = startRow + chunkSize - 1;
+      // 컬럼 prefix 분리: 'A:L' → 'A', 'L'
+      const [colStart, colEnd] = columns.split(':');
+      const range = `'${tabName}'!${colStart}${startRow}:${colEnd}${endRow}`;
+      const chunk = await this.getRange(spreadsheetId, range);
+      if (chunk.length === 0) break;
+      all.push(...chunk);
+      logger.debug({ tabName, startRow, endRow, got: chunk.length, total: all.length }, 'Chunked read');
+      if (chunk.length < chunkSize) break;  // 마지막 청크
+      startRow = endRow + 1;
+    }
+    return all;
+  }
+
   async appendRows(
     spreadsheetId: string,
     range: string,

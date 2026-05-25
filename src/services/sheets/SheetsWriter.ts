@@ -30,13 +30,29 @@ export class SheetsWriter {
   async loadExistingKeys(spreadsheetId: string, tabName: string): Promise<Set<string>> {
     const keys = new Set<string>();
     try {
-      const rows = await this.client.getRange(spreadsheetId, `'${tabName}'!A:L`);
+      // 청크 읽기로 큰 시트도 안전하게 (GA 환경에서 한번에 14k행 못 가져오는 이슈 우회)
+      const rows = await this.client.getRangeChunked(spreadsheetId, tabName, 'A:L', 5000);
+      let nonHeaderRowCount = 0;
       for (const row of rows.slice(1)) {
+        nonHeaderRowCount++;
         const permalink = row[LINK_COL_INDEX] ?? '';
         if (permalink) keys.add(permalink);
       }
-      logger.info({ count: keys.size }, 'Loaded existing permalink keys');
-    } catch {
+      logger.info(
+        { count: keys.size, totalRows: nonHeaderRowCount },
+        'Loaded existing permalink keys'
+      );
+
+      // 안전 체크: 행 수와 permalink 수 차이가 큰 경우 (10% 이상) abort
+      // 이는 시트 일부만 읽혀서 중복 추가될 위험을 방지
+      if (nonHeaderRowCount > 100 && keys.size < nonHeaderRowCount * 0.9) {
+        throw new Error(
+          `SAFETY: existing keys (${keys.size}) much less than rows (${nonHeaderRowCount}). ` +
+          `Aborting to prevent duplicates. Sheet read may be incomplete.`
+        );
+      }
+    } catch (e: any) {
+      if (e?.message?.startsWith('SAFETY:')) throw e;
       // 탭이 없거나 비어있으면 빈 Set 반환
     }
     return keys;
