@@ -24,16 +24,20 @@ Every day at 2 AM KST, automatically:
 ```mermaid
 flowchart LR
     A["💬 Slack Channel<br/>작품관련소통"] --> B["✨ Auto Pipeline"]
-    B --> C["📋 Google Sheets<br/>(our sheet)"]
-    B --> D["🖼 Supabase<br/>(image storage)"]
-    D --> C
-    C --> E["📈 Dashboard<br/>(coming soon)"]
+    B --> C["📋 Google Sheets<br/>(humans view & edit)"]
+    C --> D["🗄 Supabase<br/>(DB + image storage)"]
+    D --> E["📈 Dashboard<br/>(coming soon)"]
 
     style A fill:#4A154B,color:#fff
     style C fill:#0F9D58,color:#fff
     style D fill:#3ECF8E,color:#fff
     style E fill:#FFA500,color:#fff
 ```
+
+**Role of each layer:**
+- **Google Sheets** — Workspace where humans view, edit, and review
+- **Supabase** — Data warehouse for the dashboard (fast queries, image hosting)
+- **Dashboard** — Search/filter/visualization UI
 
 ---
 

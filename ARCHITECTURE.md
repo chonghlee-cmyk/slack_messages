@@ -24,16 +24,20 @@
 ```mermaid
 flowchart LR
     A["💬 Slack 채널<br/>작품관련소통"] --> B["✨ 자동 정리"]
-    B --> C["📋 Google Sheets<br/>(우리 시트)"]
-    B --> D["🖼 Supabase<br/>(이미지 저장소)"]
-    D --> C
-    C --> E["📈 대시보드<br/>(앞으로 만들 거)"]
+    B --> C["📋 Google Sheets<br/>(사람이 보고 수정)"]
+    C --> D["🗄 Supabase<br/>(DB + 이미지 저장소)"]
+    D --> E["📈 대시보드<br/>(앞으로 만들 거)"]
 
     style A fill:#4A154B,color:#fff
     style C fill:#0F9D58,color:#fff
     style D fill:#3ECF8E,color:#fff
     style E fill:#FFA500,color:#fff
 ```
+
+**각 단계의 역할:**
+- **Google Sheets** — 사람이 직접 보고/수정/검토하는 "작업 공간"
+- **Supabase** — 대시보드용 "데이터 창고" (빠른 조회, 이미지 호스팅)
+- **대시보드** — 검색/필터/시각화 UI
 
 ---
 
