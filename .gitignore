@@ -18,3 +18,10 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code 내부 파일
+.claude/
+
+# 임시 파일
+temp.txt
+debug/
