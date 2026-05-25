@@ -3,12 +3,25 @@ import { SlackMessage, ThreadReply } from '../../types/slack';
 import { formatDateKST, formatTimeKST } from '../../utils/dateUtils';
 import { logger } from '../../utils/logger';
 
-type SheetRow = [string, string, string, string, string, string, string];
+// Is Reply | Channel | Sender | Date | Time | Message | Link | Parent Message | Parent Link | Image URLs | Image Count | Image Sizes (MB)
+type SheetRow = [
+  string, string, string, string, string, string, string,
+  string, string, string, string, string
+];
+
+const HEADER: SheetRow = [
+  'Is Reply', 'Channel', 'Sender', 'Date', 'Time', 'Message', 'Link',
+  'Parent Message', 'Parent Link', 'Image URLs', 'Image Count', 'Image Sizes (MB)',
+];
+
+const LINK_COL_INDEX = 6; // G열
 
 export interface SyncLogEntry {
   startedAt: Date;
   finishedAt: Date;
   mode: string;
+  newMessages: number;
+  newReplies: number;
 }
 
 export class SheetsWriter {
@@ -17,11 +30,10 @@ export class SheetsWriter {
   async loadExistingKeys(spreadsheetId: string, tabName: string): Promise<Set<string>> {
     const keys = new Set<string>();
     try {
-      const rows = await this.client.getRange(spreadsheetId, `'${tabName}'!A:G`);
+      const rows = await this.client.getRange(spreadsheetId, `'${tabName}'!A:L`);
       for (const row of rows.slice(1)) {
-        const artworkName = row[0] ?? '';
-        const permalink = row[6] ?? '';
-        if (artworkName && permalink) keys.add(`${artworkName}|${permalink}`);
+        const permalink = row[LINK_COL_INDEX] ?? '';
+        if (permalink) keys.add(permalink);
       }
       logger.info({ count: keys.size }, 'Loaded existing permalink keys');
     } catch {
@@ -31,15 +43,14 @@ export class SheetsWriter {
   }
 
   async ensureHeader(spreadsheetId: string, tabName: string): Promise<void> {
-    const range = `'${tabName}'!A1:G1`;
+    await this.client.ensureTabExists(spreadsheetId, tabName);
+
+    const range = `'${tabName}'!A1:L1`;
     const existing = await this.client.getRange(spreadsheetId, range);
 
-    if (existing.length > 0 && existing[0][0] === 'Title Name') return;
+    if (existing.length > 0 && existing[0][0] === 'Is Reply') return;
 
-    const header: SheetRow = [
-      'Title Name', 'Channel Name', 'Sender', 'Date', 'Time', 'Message Content', 'Message Link',
-    ];
-    await this.client.updateRange(spreadsheetId, range, [header]);
+    await this.client.updateRange(spreadsheetId, range, [HEADER]);
     logger.info({ tabName }, 'Header row created');
   }
 
@@ -65,11 +76,15 @@ export class SheetsWriter {
   }
 
   async ensureLogHeader(spreadsheetId: string, logTabName: string): Promise<void> {
-    const range = `'${logTabName}'!A1:D1`;
-    const existing = await this.client.getRange(spreadsheetId, range);
-    if (existing.length > 0 && existing[0][0] === '실행일') return;
+    await this.client.ensureTabExists(spreadsheetId, logTabName);
 
-    await this.client.updateRange(spreadsheetId, range, [['실행일', '실행 시간', '소요 시간', '모드']]);
+    const range = `'${logTabName}'!A1:F1`;
+    const existing = await this.client.getRange(spreadsheetId, range);
+    if (existing.length > 0 && existing[0][0] === '실행일' && existing[0].length >= 6) return;
+
+    await this.client.updateRange(spreadsheetId, range, [[
+      '실행일', '실행 시간', '소요 시간', '모드', '신규 메시지', '신규 답글',
+    ]]);
   }
 
   async appendLogRow(spreadsheetId: string, logTabName: string, entry: SyncLogEntry): Promise<void> {
@@ -93,31 +108,54 @@ export class SheetsWriter {
       time,
       durationStr,
       entry.mode === 'full' ? '전체' : '증분',
+      String(entry.newMessages),
+      String(entry.newReplies),
     ]]);
     logger.info({ logTabName }, 'Sync log row appended');
   }
 
+  private jsonOrEmpty(arr: string[]): string {
+    return arr.length === 0 ? '' : JSON.stringify(arr);
+  }
+
+  private bytesToMB(bytes: number[]): string {
+    if (bytes.length === 0) return '';
+    const total = bytes.reduce((a, b) => a + b, 0);
+    if (total === 0) return '';
+    return (total / 1024 / 1024).toFixed(2);
+  }
+
   private messageToRow(msg: SlackMessage): SheetRow {
     return [
-      msg.artworkName,
+      'FALSE',
       msg.slackChannelName || msg.slackChannelId,
       msg.senderName,
       formatDateKST(msg.slackCreatedAt),
       formatTimeKST(msg.slackCreatedAt),
       msg.textClean,
       msg.permalink,
+      '', // Parent Message
+      '', // Parent Link
+      this.jsonOrEmpty(msg.imageUrls),
+      msg.imageUrls.length === 0 ? '' : String(msg.imageUrls.length),
+      this.bytesToMB(msg.imageBytes),
     ];
   }
 
   private replyToRow(reply: ThreadReply): SheetRow {
     return [
-      reply.artworkName,
+      'TRUE',
       reply.slackChannelName || reply.slackChannelId,
       reply.senderName,
       formatDateKST(reply.slackCreatedAt),
       formatTimeKST(reply.slackCreatedAt),
       reply.textClean,
       reply.permalink,
+      reply.parentText,
+      reply.parentPermalink,
+      this.jsonOrEmpty(reply.imageUrls),
+      reply.imageUrls.length === 0 ? '' : String(reply.imageUrls.length),
+      this.bytesToMB(reply.imageBytes),
     ];
   }
 }

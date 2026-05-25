@@ -15,13 +15,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@slack/web-api": "^7.3.4",
     "@supabase/supabase-js": "^2.45.4",
+    "axios": "^1.16.1",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
     "node-emoji": "^1.11.0",
     "pino": "^9.4.0",
     "pino-pretty": "^11.3.0",
+    "sharp": "^0.34.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {

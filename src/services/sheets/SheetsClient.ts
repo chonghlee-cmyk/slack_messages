@@ -94,7 +94,8 @@ export class SheetsClient {
       sheets.spreadsheets.values.append({
         spreadsheetId,
         range,
-        valueInputOption: 'USER_ENTERED',
+        // RAW: 텍스트 그대로 저장 (날짜/숫자 자동 변환 방지)
+        valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values },
       })
@@ -115,6 +116,45 @@ export class SheetsClient {
         range,
         valueInputOption: 'USER_ENTERED',
         requestBody: { values },
+      })
+    );
+  }
+
+  async ensureTabExists(spreadsheetId: string, tabName: string): Promise<void> {
+    const sheets = await this.getSheets();
+
+    // 현재 시트 목록 조회
+    const meta = await this.withRetry(() =>
+      sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' })
+    );
+    const existing = (meta.data.sheets ?? []).map(s => s.properties?.title);
+    if (existing.includes(tabName)) return;
+
+    await this.withRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: tabName } } }],
+        },
+      })
+    );
+    logger.info({ tabName }, 'Sheet tab created');
+  }
+
+  async batchUpdate(
+    spreadsheetId: string,
+    updates: Array<{ range: string; values: string[][] }>
+  ): Promise<void> {
+    const sheets = await this.getSheets();
+    logger.debug({ spreadsheetId, count: updates.length }, 'Sheets batchUpdate');
+
+    await this.withRetry(() =>
+      sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: updates.map(u => ({ range: u.range, values: u.values })),
+        },
       })
     );
   }

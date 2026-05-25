@@ -2,6 +2,7 @@ import { WebClient, LogLevel } from '@slack/web-api';
 import { RateLimiter } from './RateLimiter';
 import { SlackSearchResponse, SlackApiMessage } from '../../types/slack';
 import { logger } from '../../utils/logger';
+import { sleep } from '../../utils/sleep';
 
 export interface SearchOptions {
   count: number;
@@ -13,6 +14,7 @@ export class SlackClient {
   private rateLimiter: RateLimiter;
   private workspaceDomain: string | null = null;
   private userCache: Map<string, { shortName: string; fullLabel: string }> = new Map();
+  private userGroupCache: Map<string, string> | null = null;
 
   constructor(token: string) {
     this.client = new WebClient(token, { logLevel: LogLevel.ERROR });
@@ -65,6 +67,70 @@ export class SlackClient {
     } while (cursor);
 
     return replies;
+  }
+
+  async getChannelHistory(channelId: string, oldest?: number, latest?: number): Promise<SlackApiMessage[]> {
+    const allMessages: SlackApiMessage[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const result = await this.rateLimiter.execute(3, () =>
+        this.client.conversations.history({
+          channel: channelId,
+          cursor,
+          limit: 200,
+          ...(oldest !== undefined ? { oldest: String(oldest) } : {}),
+          ...(latest !== undefined ? { latest: String(latest) } : {}),
+          inclusive: true,
+        })
+      );
+
+      const messages = (result.messages as SlackApiMessage[] | undefined) ?? [];
+      allMessages.push(...messages);
+
+      cursor = result.response_metadata?.next_cursor || undefined;
+      if (cursor) await sleep(300);
+    } while (cursor);
+
+    logger.debug({ channelId, count: allMessages.length }, 'Channel history fetched');
+    return allMessages;
+  }
+
+  async getChannelInfo(channelId: string): Promise<{ id: string; name: string }> {
+    const result = await this.rateLimiter.execute(3, () =>
+      this.client.conversations.info({ channel: channelId })
+    );
+    const ch = result.channel as any;
+    return { id: channelId, name: ch?.name ?? channelId };
+  }
+
+  async getUserGroupName(groupId: string): Promise<string> {
+    const map = await this.loadUserGroups();
+    return map.get(groupId) ?? 'team';
+  }
+
+  private async loadUserGroups(): Promise<Map<string, string>> {
+    if (this.userGroupCache) return this.userGroupCache;
+    const map = new Map<string, string>();
+    try {
+      const result = await this.rateLimiter.execute(2, () =>
+        this.client.usergroups.list({ include_disabled: true })
+      );
+      const groups = (result.usergroups as any[] | undefined) ?? [];
+      for (const g of groups) {
+        const id: string = g.id;
+        const name: string = g.name || g.handle || id;
+        if (id) map.set(id, name);
+      }
+      logger.debug({ count: map.size }, 'User groups cached');
+    } catch (err: any) {
+      logger.warn(
+        { error: err?.data?.error ?? err?.message },
+        'usergroups.list failed — check usergroups:read scope. Falling back to "team".'
+      );
+    }
+    this.userGroupCache = map;
+    return map;
   }
 
   async getUserDisplayName(userId: string): Promise<string> {

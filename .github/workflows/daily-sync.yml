@@ -1,20 +1,29 @@
-name: Daily Slack Sync
+name: Daily Slack Sync + Enrich
 
 on:
   schedule:
     - cron: '0 17 * * *'   # 매일 KST 새벽 2시 (UTC 17:00)
-  workflow_dispatch:         # 수동 트리거
+  workflow_dispatch:
     inputs:
-      artwork_filter:
-        description: '특정 작품명 (비우면 전체)'
-        required: false
       force_full_sync:
         description: '전체 재수집 여부 (true/false)'
         required: false
         default: 'false'
+      dry_run:
+        description: '시트에 쓰지 않고 로그만 (true/false)'
+        required: false
+        default: 'false'
+      skip_images:
+        description: '이미지 마이그레이션 스킵 (true/false)'
+        required: false
+        default: 'false'
+      skip_enrich:
+        description: 'AI 분류 스킵 (true/false)'
+        required: false
+        default: 'false'
 
 jobs:
-  sync:
+  pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -29,28 +38,65 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Restore sync state
+      # === 진행 상태 파일들을 캐시에서 복원 ===
+      - name: Restore data cache (sync-state / image-migration / enrich)
         uses: actions/cache@v4
         with:
-          path: data/sync-state.json
-          key: sync-state-${{ github.run_id }}
+          path: data
+          key: pipeline-data-${{ github.run_id }}
           restore-keys: |
-            sync-state-
+            pipeline-data-
 
-      - name: Run sync
+      # === 1단계: Slack → 시트 (메시지/답글 수집) ===
+      - name: Step 1 - Slack sync
         run: npx ts-node src/jobs/incrementalSync.ts
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_TARGET_CHANNEL_IDS: ${{ secrets.SLACK_TARGET_CHANNEL_IDS }}
+          SLACK_TARGET_CHANNEL_ID: ${{ secrets.SLACK_TARGET_CHANNEL_ID }}
           SLACK_EXCLUDED_USER_IDS: ${{ secrets.SLACK_EXCLUDED_USER_IDS }}
           GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
-          GOOGLE_SHEETS_ARTWORK_TAB: ${{ vars.GOOGLE_SHEETS_ARTWORK_TAB }}
-          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB }}
-          GOOGLE_SHEETS_LOG_TAB: ${{ vars.GOOGLE_SHEETS_LOG_TAB }}
-          GOOGLE_SHEETS_ARTWORK_NAME_COLUMN: ${{ vars.GOOGLE_SHEETS_ARTWORK_NAME_COLUMN || '0' }}
-          SYNC_CONCURRENCY: ${{ vars.SYNC_CONCURRENCY || '3' }}
+          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
+          GOOGLE_SHEETS_LOG_TAB: ${{ vars.GOOGLE_SHEETS_LOG_TAB || 'Slack 로그' }}
+          SYNC_INITIAL_LOOKBACK_DAYS: ${{ vars.SYNC_INITIAL_LOOKBACK_DAYS || '0' }}
           FORCE_FULL_SYNC: ${{ inputs.force_full_sync || 'false' }}
-          ARTWORK_FILTER: ${{ inputs.artwork_filter }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
           LOG_FORMAT: json
           NODE_ENV: production
+
+      # === 2단계: 새 이미지 → WebP → Supabase ===
+      - name: Step 2 - Migrate new images to Supabase
+        if: ${{ inputs.skip_images != 'true' }}
+        continue-on-error: true   # 이미지 실패해도 분류는 계속
+        run: npx ts-node scripts/migrateImagesToSupabase.ts
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          LOG_FORMAT: json
+          NODE_ENV: production
+
+      # === 3단계: 새 메시지 AI 분류 (Category, 작품 매칭) ===
+      - name: Step 3 - Enrich messages with Gemini
+        if: ${{ inputs.skip_enrich != 'true' }}
+        continue-on-error: true
+        run: npx ts-node scripts/enrichMessages.ts
+        env:
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
+          LOG_FORMAT: json
+          NODE_ENV: production
+
+      # === 상태 파일 저장 (다음 실행 시 복원용) ===
+      - name: Save data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: pipeline-data-${{ github.run_id }}

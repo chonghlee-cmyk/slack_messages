@@ -4,9 +4,7 @@ import { SlackClient } from '../services/slack/SlackClient';
 import { SlackCollector } from '../services/slack/SlackCollector';
 import { MessageNormalizer } from '../services/slack/MessageNormalizer';
 import { SheetsClient } from '../services/sheets/SheetsClient';
-import { SheetsReader } from '../services/sheets/SheetsReader';
 import { SheetsWriter, SyncLogEntry } from '../services/sheets/SheetsWriter';
-import { SyncStateFile, SyncJobOptions } from '../types/sync';
 import { logger } from '../utils/logger';
 import { subtractDays } from '../utils/dateUtils';
 
@@ -15,37 +13,46 @@ const STATE_FILE = path.resolve(process.cwd(), 'data', 'sync-state.json');
 export interface EngineConfig {
   slackToken: string;
   spreadsheetId: string;
-  artworkTab: string;
+  channelId: string;
   outputTab: string;
   logTab?: string;
-  artworkNameColumn: number;
-  channelIds: string[];
   excludedUserIds: string[];
-  pageSize: number;
-  concurrency: number;
+  /** 첫 실행 시 과거 몇 일치를 가져올지 (default: 90) */
+  initialLookbackDays: number;
+}
+
+interface ChannelSyncState {
+  lastSyncedAt?: string;
+  totalMessages: number;
+  totalReplies: number;
+}
+
+type SyncStateFile = Record<string, ChannelSyncState>;
+
+export interface SyncJobOptions {
+  /** true 이면 afterDate 없이 전체 수집 */
+  forceFullSync?: boolean;
+  /** 실제로 시트에 쓰지 않고 로그만 */
+  dryRun?: boolean;
 }
 
 export class SyncEngine {
   private slackClient: SlackClient;
   private sheetsClient: SheetsClient;
-  private sheetsReader: SheetsReader;
   private sheetsWriter: SheetsWriter;
-  private stateLock = false;
-  private stateLockQueue: Array<() => void> = [];
-  private existingKeys: Set<string> = new Set();
 
   constructor(private readonly config: EngineConfig) {
     this.slackClient = new SlackClient(config.slackToken);
     this.sheetsClient = new SheetsClient();
-    this.sheetsReader = new SheetsReader(this.sheetsClient);
     this.sheetsWriter = new SheetsWriter(this.sheetsClient);
   }
 
-  async run(options: SyncJobOptions): Promise<void> {
-    const jobRunId = `run_${Date.now()}`;
+  async run(options: SyncJobOptions = {}): Promise<void> {
     const mode = options.forceFullSync ? 'full' : 'incremental';
     const startedAt = new Date();
-    logger.info({ jobRunId, mode, concurrency: this.config.concurrency }, 'Sync started');
+    const { channelId, spreadsheetId, outputTab } = this.config;
+
+    logger.info({ channelId, mode }, 'Sync started');
 
     const domain = await this.slackClient.getWorkspaceDomain();
     const normalizer = new MessageNormalizer(
@@ -55,123 +62,93 @@ export class SyncEngine {
     );
     const collector = new SlackCollector(this.slackClient, normalizer);
 
-    await this.sheetsWriter.ensureHeader(this.config.spreadsheetId, this.config.outputTab);
-    this.existingKeys = await this.sheetsWriter.loadExistingKeys(this.config.spreadsheetId, this.config.outputTab);
+    // 헤더 & 기존 키 로드
+    await this.sheetsWriter.ensureHeader(spreadsheetId, outputTab);
+    const existingKeys = await this.sheetsWriter.loadExistingKeys(spreadsheetId, outputTab);
 
-    const artworks = await this.sheetsReader.readArtworks(
-      this.config.spreadsheetId,
-      this.config.artworkTab,
-      this.config.artworkNameColumn
-    );
+    // 증분 범위 계산
+    // - 전체 재수집: afterDate 없음
+    // - 증분: 오늘 기준 어제부터 (D-1) — 오늘 sync 시 어제+오늘 모두 커버
+    // - 첫 실행(state 없음): initialLookbackDays 일 전부터
+    let afterDate: Date | undefined;
 
-    const toProcess = options.artworkFilter?.length
-      ? artworks.filter(a => options.artworkFilter!.includes(a.name))
-      : artworks;
+    if (!options.forceFullSync) {
+      const state = this.loadSyncState();
+      const channelState = state[channelId];
 
-    logger.info({ total: toProcess.length, mode }, 'Starting artwork sync');
-
-    if (this.config.logTab) {
-      await this.sheetsWriter.ensureLogHeader(this.config.spreadsheetId, this.config.logTab);
-    }
-
-    const syncState = this.loadSyncState();
-    let successCount = 0;
-    let failCount = 0;
-    let totalMessages = 0;
-    let totalReplies = 0;
-    const newArtworks: string[] = [];
-
-    // 동시 처리 큐
-    const queue = [...toProcess.entries()];
-    const total = toProcess.length;
-
-    const worker = async () => {
-      while (true) {
-        const next = queue.shift();
-        if (!next) break;
-        const [i, artwork] = next;
-        const artworkState = syncState[artwork.name];
-
-        let afterDate: Date | undefined;
-        if (!options.forceFullSync && artworkState?.lastSyncedAt) {
-          afterDate = subtractDays(new Date(artworkState.lastSyncedAt), 1); // 1일 여유
-        } else if (!options.forceFullSync) {
-          afterDate = subtractDays(new Date(), options.initialLookbackDays);
-        }
-
-        logger.info({ artwork: artwork.name, progress: `${i + 1}/${total}` }, 'Syncing artwork');
-
-        try {
-          const result = await collector.collectForArtwork(artwork.name, {
-            channelIds: this.config.channelIds,
-            pageSize: this.config.pageSize,
-            afterDate,
-          });
-
-          // dedup: 작품명 + permalink 기준 (동기적으로 체크 후 set에 추가)
-          const newMessages = result.messages.filter(m => {
-            const key = `${m.artworkName}|${m.permalink}`;
-            if (this.existingKeys.has(key)) return false;
-            this.existingKeys.add(key);
-            return true;
-          });
-          const newReplies = result.replies.filter(r => {
-            const key = `${r.artworkName}|${r.permalink ?? ''}`;
-            if (this.existingKeys.has(key)) return false;
-            this.existingKeys.add(key);
-            return true;
-          });
-
-          if (newMessages.length > 0 || newReplies.length > 0) {
-            await this.sheetsWriter.appendRows(
-              this.config.spreadsheetId,
-              this.config.outputTab,
-              options.dryRun ? [] : newMessages,
-              options.dryRun ? [] : newReplies
-            );
-            totalMessages += newMessages.length;
-            totalReplies += newReplies.length;
-            newArtworks.push(artwork.name);
-            logger.info(
-              { artwork: artwork.name, messages: newMessages.length, replies: newReplies.length },
-              'Artwork sync done'
-            );
-          } else {
-            logger.debug({ artwork: artwork.name }, 'No new messages');
-          }
-
-          syncState[artwork.name] = {
-            lastSyncedAt: new Date().toISOString(),
-            status: 'completed',
-            totalMessages: (artworkState?.totalMessages ?? 0) + newMessages.length,
-            totalReplies: (artworkState?.totalReplies ?? 0) + newReplies.length,
-          };
-          await this.saveSyncStateLocked(syncState);
-          successCount++;
-        } catch (err: any) {
-          logger.error({ artwork: artwork.name, error: err.message }, 'Artwork sync failed');
-          syncState[artwork.name] = {
-            ...(artworkState ?? { totalMessages: 0, totalReplies: 0 }),
-            status: 'failed',
-            errorMessage: err.message,
-          };
-          await this.saveSyncStateLocked(syncState);
-          failCount++;
+      if (channelState?.lastSyncedAt) {
+        // 매일 실행: 어제(D-1)부터 수집해 누락 방지
+        afterDate = subtractDays(new Date(), 1);
+        logger.info({ afterDate: afterDate.toISOString() }, 'Incremental sync: collecting from yesterday');
+      } else {
+        // 첫 실행: 0이면 전체 히스토리, 아니면 지정된 일수만큼
+        if (this.config.initialLookbackDays > 0) {
+          afterDate = subtractDays(new Date(), this.config.initialLookbackDays);
+          logger.info(
+            { afterDate: afterDate.toISOString(), days: this.config.initialLookbackDays },
+            'First run: collecting initial lookback'
+          );
+        } else {
+          afterDate = undefined;
+          logger.info('First run: collecting full channel history (no date limit)');
         }
       }
-    };
+    }
 
-    await Promise.all(Array.from({ length: this.config.concurrency }, () => worker()));
+    // 수집
+    const result = await collector.collectChannel(channelId, { afterDate });
+
+    // dedup: permalink 기준
+    const newMessages = result.messages.filter(m => {
+      if (existingKeys.has(m.permalink)) return false;
+      existingKeys.add(m.permalink);
+      return true;
+    });
+    const newReplies = result.replies.filter(r => {
+      if (existingKeys.has(r.permalink)) return false;
+      existingKeys.add(r.permalink);
+      return true;
+    });
+
+    logger.info(
+      { new: newMessages.length + newReplies.length, total: result.totalFound },
+      'Dedup complete'
+    );
+
+    // 시트에 쓰기
+    if (!options.dryRun && (newMessages.length > 0 || newReplies.length > 0)) {
+      await this.sheetsWriter.appendRows(spreadsheetId, outputTab, newMessages, newReplies);
+    } else if (options.dryRun) {
+      logger.info('Dry run — skipping sheet write');
+    } else {
+      logger.info('No new messages to write');
+    }
+
+    // sync state 저장
+    const state = this.loadSyncState();
+    state[channelId] = {
+      lastSyncedAt: new Date().toISOString(),
+      totalMessages: (state[channelId]?.totalMessages ?? 0) + newMessages.length,
+      totalReplies: (state[channelId]?.totalReplies ?? 0) + newReplies.length,
+    };
+    this.saveSyncState(state);
 
     const finishedAt = new Date();
 
     if (this.config.logTab) {
-      const logEntry: SyncLogEntry = { startedAt, finishedAt, mode };
-      await this.sheetsWriter.appendLogRow(this.config.spreadsheetId, this.config.logTab, logEntry);
+      await this.sheetsWriter.ensureLogHeader(spreadsheetId, this.config.logTab);
+      const logEntry: SyncLogEntry = {
+        startedAt,
+        finishedAt,
+        mode,
+        newMessages: newMessages.length,
+        newReplies: newReplies.length,
+      };
+      await this.sheetsWriter.appendLogRow(spreadsheetId, this.config.logTab, logEntry);
     }
 
     logger.info(
-      { jobRunId, successCount, failCount, totalMessages, totalReplies },
+      { newMessages: newMessages.length, newReplies: newReplies.length },
       'Sync completed'
     );
   }
@@ -187,25 +164,13 @@ export class SyncEngine {
     return {};
   }
 
-  private async saveSyncStateLocked(state: SyncStateFile): Promise<void> {
-    await new Promise<void>(resolve => {
-      if (!this.stateLock) {
-        this.stateLock = true;
-        resolve();
-      } else {
-        this.stateLockQueue.push(resolve);
-      }
-    });
+  private saveSyncState(state: SyncStateFile): void {
     try {
       const dir = path.dirname(STATE_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
     } catch (err) {
       logger.warn({ error: (err as Error).message }, 'Failed to save sync state');
-    } finally {
-      const next = this.stateLockQueue.shift();
-      if (next) next();
-      else this.stateLock = false;
     }
   }
 }

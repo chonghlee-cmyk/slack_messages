@@ -4,6 +4,10 @@ dist/
 secrets/
 *.local
 
+# Google service account keys (never commit credentials!)
+*-service-account*.json
+light-field-*.json
+
 # 로그
 *.log
 logs/

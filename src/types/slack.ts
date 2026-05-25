@@ -6,12 +6,15 @@ export interface SlackMessage {
   text: string;
   textClean: string;
   permalink: string;
-  artworkName: string;
+  isReply: false;
   senderName: string;
   isBot: boolean;
   threadTs?: string;
   replyCount: number;
   slackCreatedAt: Date;
+  imageUrls: string[];
+  imageNames: string[];
+  imageBytes: number[];
 }
 
 export interface ThreadReply {
@@ -23,10 +26,15 @@ export interface ThreadReply {
   text: string;
   textClean: string;
   permalink: string;
+  isReply: true;
   senderName: string;
   isBot: boolean;
   slackCreatedAt: Date;
-  artworkName: string;
+  imageUrls: string[];
+  imageNames: string[];
+  imageBytes: number[];
+  parentText: string;
+  parentPermalink: string;
 }
 
 // Slack API raw 응답 타입 (우리가 사용하는 필드만)
@@ -44,6 +52,17 @@ export interface SlackApiMessage {
   reply_count?: number;
   reply_users_count?: number;
   team?: string;
+  files?: SlackApiFile[];
+}
+
+export interface SlackApiFile {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  url_private?: string;
+  url_private_download?: string;
+  permalink?: string;
+  size?: number;
 }
 
 export interface SlackSearchResponse {

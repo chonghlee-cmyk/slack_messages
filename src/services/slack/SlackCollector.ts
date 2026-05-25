@@ -1,13 +1,9 @@
 import { SlackClient } from './SlackClient';
 import { MessageNormalizer } from './MessageNormalizer';
 import { SlackMessage, ThreadReply } from '../../types/slack';
-import { dateToSlackSearchDate } from '../../utils/dateUtils';
-import { sleep } from '../../utils/sleep';
 import { logger } from '../../utils/logger';
 
-export interface CollectOptions {
-  channelIds: string[];
-  pageSize: number;
+export interface CollectChannelOptions {
   afterDate?: Date;
 }
 
@@ -23,72 +19,71 @@ export class SlackCollector {
     private readonly normalizer: MessageNormalizer
   ) {}
 
-  async collectForArtwork(
-    artworkName: string,
-    options: CollectOptions
+  async collectChannel(
+    channelId: string,
+    options: CollectChannelOptions = {}
   ): Promise<CollectResult> {
-    const query = this.buildQuery(artworkName, options.channelIds, options.afterDate);
-    logger.debug({ artworkName, query }, 'Searching Slack');
+    // afterDate → Slack oldest 파라미터 (Unix timestamp 초 단위)
+    const oldest = options.afterDate
+      ? options.afterDate.getTime() / 1000
+      : undefined;
+
+    logger.info(
+      { channelId, after: options.afterDate?.toISOString() ?? 'all' },
+      'Fetching channel history'
+    );
+
+    // 채널 정보 (이름) 가져오기
+    const channelInfo = await this.slackClient.getChannelInfo(channelId);
+    const channelName = channelInfo.name;
+
+    const rawMessages = await this.slackClient.getChannelHistory(channelId, oldest);
 
     const allMessages: SlackMessage[] = [];
     const allReplies: ThreadReply[] = [];
-    let page = 1;
-    let totalPages = 1;
-    let totalFound = 0;
 
-    do {
-      const result = await this.slackClient.searchMessages(query, {
-        count: options.pageSize,
-        page,
-      });
+    for (const raw of rawMessages) {
+      // 스레드 루트가 아닌 답글 메시지는 history에 포함될 수 있으므로 스킵
+      // (thread_ts가 있고 ts !== thread_ts 이면 답글)
+      if (raw.thread_ts && raw.ts !== raw.thread_ts) continue;
 
-      if (!result?.messages) break;
+      const msg = await this.normalizer.normalize(raw, channelId, channelName);
+      if (msg) allMessages.push(msg);
 
-      const { matches, paging } = result.messages;
-      totalPages = paging?.pages ?? 1;
-      totalFound = paging?.total ?? 0;
+      // 스레드 답글 수집 (부모가 봇/빈 메시지여도 답글은 가져옴)
+      const replyCount = raw.reply_count ?? 0;
+      const threadTs = raw.thread_ts ?? raw.ts;
+      if (replyCount > 0 && threadTs) {
+        // parent 정보: 부모가 정상이면 msg에서, 봇/빈이면 raw에서 fallback
+        const parentText = msg?.textClean ?? (raw.text ?? '[봇/시스템 메시지]');
+        const parentPermalink = msg?.permalink ?? raw.permalink ?? '';
 
-      if (matches.length > 0) {
-        logger.debug(
-          { artworkName, page, totalPages, matches: matches.length },
-          'Search page fetched'
+        const rawReplies = await this.slackClient.getThreadReplies(
+          channelId,
+          threadTs
         );
-      }
-
-      for (const raw of matches) {
-        const msg = await this.normalizer.normalize(raw, artworkName);
-        if (!msg) continue;
-        allMessages.push(msg);
-
-        // 스레드 답글 수집
-        if (msg.replyCount > 0 && msg.threadTs) {
-          const rawReplies = await this.slackClient.getThreadReplies(
-            msg.slackChannelId,
-            msg.threadTs
+        for (const rawReply of rawReplies) {
+          const reply = await this.normalizer.normalizeReply(
+            rawReply,
+            channelId,
+            channelName,
+            parentText,
+            parentPermalink
           );
-          for (const rawReply of rawReplies) {
-            const reply = await this.normalizer.normalizeReply(
-              rawReply,
-              msg.slackChannelId,
-              msg.slackChannelName,
-              artworkName
-            );
-            if (reply) allReplies.push(reply);
-          }
+          if (reply) allReplies.push(reply);
         }
       }
+    }
 
-      page++;
-      if (page <= totalPages) await sleep(300);
-    } while (page <= totalPages);
+    logger.info(
+      { channelId, messages: allMessages.length, replies: allReplies.length },
+      'Channel collection complete'
+    );
 
-    return { messages: allMessages, replies: allReplies, totalFound };
-  }
-
-  private buildQuery(artworkName: string, channelIds: string[], afterDate?: Date): string {
-    // in:<#CHANNELID> 여러 개 = OR 로직 (하나라도 포함된 채널)
-    const channelFilters = channelIds.map(id => `in:<#${id}>`).join(' ');
-    const afterFilter = afterDate ? ` after:${dateToSlackSearchDate(afterDate)}` : '';
-    return `"${artworkName}" ${channelFilters}${afterFilter}`;
+    return {
+      messages: allMessages,
+      replies: allReplies,
+      totalFound: rawMessages.length,
+    };
   }
 }
