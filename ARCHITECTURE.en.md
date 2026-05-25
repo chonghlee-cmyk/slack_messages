@@ -41,7 +41,7 @@ flowchart LR
 
 ---
 
-## 🤖 Daily Automated Pipeline
+## 🤖 Daily Automated Pipeline (4 Steps)
 
 ### Step 1 — Fetch Messages
 
@@ -85,6 +85,19 @@ flowchart LR
 - AI reads each message and **classifies the issue type** (8 categories)
 - **Extracts title number/name** and matches against title database
 - Handles typos automatically (e.g., `8731 부녀회장` → DB has `8730 부녀회장` → corrected)
+
+### Step 4 — Sync to Supabase DB
+
+```mermaid
+flowchart LR
+    A["Google Sheets<br/>(complete data)"] --> B["Upload to Supabase<br/>tables (upsert)"]
+    B --> C["Fast queries from<br/>dashboard"]
+```
+
+- Copies all sheet rows (messages, classifications, title matches) to **Supabase DB**
+- Also syncs 2,009 titles to a separate table
+- **14,000 rows synced in ~7 seconds**
+- Dashboard queries **Supabase instead of Sheets** → much faster
 
 ---
 
