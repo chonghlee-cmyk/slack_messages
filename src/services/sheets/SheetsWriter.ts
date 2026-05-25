@@ -30,12 +30,13 @@ export class SheetsWriter {
   async loadExistingKeys(spreadsheetId: string, tabName: string): Promise<Set<string>> {
     const keys = new Set<string>();
     try {
-      // 청크 읽기로 큰 시트도 안전하게 (GA 환경에서 한번에 14k행 못 가져오는 이슈 우회)
-      const rows = await this.client.getRangeChunked(spreadsheetId, tabName, 'A:L', 5000);
+      // G 컬럼만 단독으로 읽기 (Permalink 컬럼)
+      // 이유: 넓은 범위(A:L) 읽으면 GA 환경에서 일부 행의 컬럼이 trim되는 이슈
+      const rows = await this.client.getRange(spreadsheetId, `'${tabName}'!G:G`);
       let nonHeaderRowCount = 0;
       for (const row of rows.slice(1)) {
         nonHeaderRowCount++;
-        const permalink = row[LINK_COL_INDEX] ?? '';
+        const permalink = row[0] ?? ''; // G 컬럼만 읽었으므로 index 0
         if (permalink) keys.add(permalink);
       }
       logger.info(
@@ -44,7 +45,6 @@ export class SheetsWriter {
       );
 
       // 안전 체크: 행 수와 permalink 수 차이가 큰 경우 (10% 이상) abort
-      // 이는 시트 일부만 읽혀서 중복 추가될 위험을 방지
       if (nonHeaderRowCount > 100 && keys.size < nonHeaderRowCount * 0.9) {
         throw new Error(
           `SAFETY: existing keys (${keys.size}) much less than rows (${nonHeaderRowCount}). ` +
