@@ -1,391 +1,206 @@
-# 📡 Slack HUB — 시스템 아키텍처 문서
+# 📡 Slack HUB
 
-> 작품관련소통 Slack 채널의 메시지/답글/이미지를 자동 수집·분류해서 Google Sheets와 Supabase에 저장하는 파이프라인.
-> 대시보드의 데이터 소스로 사용 예정.
-
----
-
-## 1. 한 줄 요약
-
-**Slack 채널 → (수집) → Google Sheets → (AI 분류 + 이미지 변환) → Supabase + Sheets** 를 매일 자동으로 돌리는 시스템.
+> Slack 채널의 메시지를 자동으로 정리해서 Google Sheets에 모아주는 시스템
 
 ---
 
-## 2. 🔭 전체 아키텍처
+## 🎯 이게 뭐 하는 거?
 
-```mermaid
-flowchart TB
-    subgraph EXT["🌐 외부 서비스"]
-        SLACK["Slack API<br/>(conversations.history,<br/>conversations.replies,<br/>usergroups.list)"]
-        GS["Google Sheets API"]
-        SUP["Supabase Storage"]
-        GEM["Google Gemini AI<br/>(gemini-2.5-flash)"]
-    end
+매일 새벽 2시에 자동으로:
 
-    subgraph CORE["⚙️ 핵심 파이프라인 (매일 KST 02:00 GitHub Actions)"]
-        STEP1["1️⃣ Slack 수집<br/>incrementalSync.ts"]
-        STEP2["2️⃣ 이미지 마이그레이션<br/>migrateImagesToSupabase.ts"]
-        STEP3["3️⃣ AI 분류<br/>enrichMessages.ts"]
-    end
+1. **Slack에서** 어제+오늘 메시지/답글을 가져와서
+2. **이미지는 따로 저장**해서 어디서든 볼 수 있게 만들고
+3. **AI로 자동 분류**해서 어떤 종류의 이슈인지, 어떤 작품인지 알려줌
+4. 결과를 **Google Sheets**에 정리
 
-    subgraph DATA["💾 데이터 저장"]
-        SHEET["Google Sheets<br/>📑 Slack 탭 (메시지 데이터)<br/>📑 작품정보 탭 (IMPORTRANGE)<br/>📑 Slack 로그 탭"]
-        STORAGE["Supabase Storage<br/>📦 slack-images bucket<br/>(WebP 이미지 ~103MB)"]
-        STATE["data/ 진행 상태<br/>📄 sync-state.json<br/>📄 image-migration.json<br/>📄 enrich-progress.json"]
-    end
-
-    SLACK -->|메시지 fetch| STEP1
-    STEP1 -->|append rows| SHEET
-    STEP1 -.->|마지막 동기화 시점| STATE
-
-    SHEET -->|이미지 URL 읽기| STEP2
-    SLACK -->|이미지 다운로드| STEP2
-    STEP2 -->|WebP 업로드| STORAGE
-    STEP2 -.->|업로드 진행 상태| STATE
-    STEP2 -->|URL 교체| SHEET
-
-    SHEET -->|메시지 텍스트 읽기| STEP3
-    STEP3 -->|분류 요청| GEM
-    GEM --> STEP3
-    SHEET -.->|작품 DB| STEP3
-    STEP3 -.->|분류 진행 상태| STATE
-    STEP3 -->|Category/작품 매칭 쓰기| SHEET
-
-    style STEP1 fill:#cce5ff
-    style STEP2 fill:#d4edda
-    style STEP3 fill:#fff3cd
-```
+→ 매일 출근하면 정리된 데이터가 시트에 들어가 있음 ✨
 
 ---
 
-## 3. 📊 매일 자동 실행되는 3단계
-
-### 단계 1️⃣ — Slack 메시지 수집
-
-```mermaid
-sequenceDiagram
-    participant GH as GitHub Actions
-    participant SE as SyncEngine
-    participant SC as SlackClient
-    participant N as MessageNormalizer
-    participant SW as SheetsWriter
-    participant GS as Google Sheets
-
-    GH->>SE: run(incremental)
-    SE->>SE: 어제(D-1)부터 수집 결정
-    SE->>SC: getChannelHistory(channelId, oldest=D-1)
-    loop 페이지네이션
-        SC->>+SC: conversations.history (200/페이지)
-        SC-->>-SE: raw messages
-    end
-    SE->>SW: loadExistingKeys (중복 체크용)
-    SW->>GS: GET 모든 permalink
-
-    loop 각 메시지
-        SE->>N: normalize(raw, channelId, name)
-        N->>SC: getUserDisplayName(userId)
-        N->>SC: getUserGroupName(subteamId)
-        N-->>SE: 정제된 메시지
-        alt reply_count > 0
-            SE->>SC: getThreadReplies(threadTs)
-            SC-->>SE: 답글들
-            loop 각 답글
-                SE->>N: normalizeReply(raw, parent)
-                N-->>SE: 정제된 답글
-            end
-        end
-    end
-
-    SE->>SE: dedup (permalink 기준)
-    SE->>SW: appendRows(messages, replies)
-    SW->>GS: batch append
-    SE->>SW: appendLogRow (로그 탭 기록)
-```
-
-**핵심 동작:**
-- 매일 실행 시 **어제+오늘** 범위 가져옴 (D-1부터, 누락 방지용 1일 버퍼)
-- 첫 실행: `SYNC_INITIAL_LOOKBACK_DAYS=0` → 채널 전체 히스토리
-- 봇 메시지/시스템 메시지 자동 필터링
-- 부모가 봇이어도 답글은 수집 (부모 텍스트는 `[봇/시스템 메시지]` 로 표시)
-- `<!subteam^ID>` 멘션은 실제 팀명으로 변환 (예: `<!subteam^S06KDTH019D>` → `@글콘실`)
-
----
-
-### 단계 2️⃣ — 이미지 마이그레이션
+## 📊 큰 그림
 
 ```mermaid
 flowchart LR
-    A[시트의 이미지 URL] -->|미처리 필터| B{이미 업로드?}
-    B -->|예| Z[스킵]
-    B -->|아니오| C[Slack에서 다운로드<br/>Authorization 헤더]
-    C --> D[Sharp 라이브러리]
-    D --> E{이미지 너무 큼?<br/>16000px 초과}
-    E -->|예| F[리사이즈]
-    E -->|아니오| G[WebP 변환<br/>quality 80]
-    F --> G
-    G --> H[Supabase Storage 업로드<br/>파일명: F{slack_file_id}.webp]
-    H --> I[공개 URL 받기]
-    I --> J[progress.json 저장]
-    J --> K[batchUpdate로 시트 J열 교체<br/>Slack URL → Supabase URL]
-```
+    A["💬 Slack 채널<br/>작품관련소통"] --> B["✨ 자동 정리"]
+    B --> C["📋 Google Sheets<br/>(우리 시트)"]
+    B --> D["🖼 Supabase<br/>(이미지 저장소)"]
+    D --> C
+    C --> E["📈 대시보드<br/>(앞으로 만들 거)"]
 
-**핵심 동작:**
-- **Slack URL은 토큰 필요** → 대시보드에서 못 봄 → Supabase 공개 URL로 교체
-- **WebP 변환**으로 평균 **88% 압축** (910MB → 103MB)
-- 파일 ID로 dedup (같은 이미지 여러 메시지에 공유돼도 1번만 저장)
-- 너무 큰 이미지(>16000px)는 리사이즈 후 변환
-- 진행 중 끊겨도 `progress.json`으로 재시작 가능
+    style A fill:#4A154B,color:#fff
+    style C fill:#0F9D58,color:#fff
+    style D fill:#3ECF8E,color:#fff
+    style E fill:#FFA500,color:#fff
+```
 
 ---
 
-### 단계 3️⃣ — AI 분류 (Gemini)
+## 🤖 매일 자동으로 하는 일
+
+### 1단계 — 메시지 가져오기
+
+```mermaid
+flowchart LR
+    A["Slack 채널<br/>어제~오늘 메시지"] --> B["봇 알림 제외<br/>(사람 메시지만)"]
+    B --> C["이름/날짜/시간<br/>정리"]
+    C --> D["시트에 추가"]
+```
+
+- **사람이 쓴 메시지와 답글만** 골라냄 (자동 봇 알림은 제외)
+- 멘션은 실제 이름으로 변환 (`<!subteam^...>` → `@글콘실`)
+- 답글이면 **원본 메시지도 같이 보여줌** (맥락 파악용)
+
+### 2단계 — 이미지 정리
+
+```mermaid
+flowchart LR
+    A["Slack 이미지"] --> B["다운로드"]
+    B --> C["WebP로 변환<br/>(용량 -88%)"]
+    C --> D["Supabase에 저장"]
+    D --> E["시트에 새 링크"]
+```
+
+- Slack 이미지는 로그인해야 보임 → **대시보드에서 안 보임**
+- 그래서 **공개 링크로 변환**해서 따로 저장
+- 용량도 **88% 압축** (910MB → 103MB)
+
+### 3단계 — AI 자동 분류
+
+```mermaid
+flowchart LR
+    A["메시지 텍스트"] --> B["AI 분석"]
+    B --> C["이슈 종류 분류<br/>(원고/일정/작가 등)"]
+    B --> D["작품 찾기<br/>(번호+이름)"]
+    D --> E["작품 DB와 매칭"]
+    C --> F["시트에 추가"]
+    E --> F
+```
+
+- 메시지 보고 **어떤 종류 이슈인지** 분류 (8가지 카테고리)
+- 메시지에서 **작품번호/작품명을 찾아서** 작품 DB와 매칭
+- 오타도 자동 보정 (예: `8731 부녀회장` → DB에는 `8730 부녀회장` → 정정)
+
+---
+
+## 📋 시트에 뭐가 들어가?
+
+| 컬럼 | 내용 | 예시 |
+|------|------|------|
+| Is Reply | 답글 여부 | `TRUE` (답글) / `FALSE` (원본) |
+| Channel | 채널 이름 | `작품관련소통_contentscomms` |
+| Sender | 작성자 | `홍길동` |
+| Date / Time | 날짜·시간 (KST) | `2026-05-21 / 14:30:22` |
+| Message | 메시지 내용 | `8730 부녀회장 회차 누락` |
+| Link | 슬랙 원본 링크 | (클릭하면 슬랙으로 이동) |
+| Parent Message | (답글일 때) 원본 메시지 | `8730 부녀회장 작가 변경 건...` |
+| Parent Link | (답글일 때) 원본 링크 | (클릭하면 슬랙으로 이동) |
+| Image URLs | 이미지 공개 링크 | `["https://...webp"]` |
+| Image Count | 이미지 개수 | `2` |
+| Image Sizes (MB) | 이미지 총 용량 | `1.85` |
+| **Category** | AI 이슈 분류 | `원고/PSD` |
+| **Sub Category** | 세부 분류 | `누락 페이지` |
+| **작품번호** | 자동 추출 | `8730` |
+| **작품명** | 자동 추출 | `부녀회장` |
+| **작품매칭** | 신뢰도 | `정확` / `이름매칭` / `유사` / `없음` |
+
+---
+
+## 🏷️ AI가 분류하는 8가지 카테고리
+
+| Category | 예시 |
+|----------|------|
+| 📄 **원고/PSD** | 누락 페이지, PSD 이슈, 로고 없음, 원고 수정/교체 |
+| 📅 **일정/스케줄** | 업로드 일정, 휴재, 연재 재개/중단 |
+| ✍️ **메타/작가** | 작가 변경, 제목 변경, 시즌/외전 |
+| 📜 **라이센스/계약** | 판권 종료, 서비스 종료 |
+| 🌐 **현지화/번역** | 번역 중단, 언어별 이슈 |
+| 💰 **BM/타입변경** | BM 변경, 가격 변경 |
+| 🚀 **런칭/오픈** | 신규 런칭, 무검열 런칭 |
+| 💬 **기타** | 일반 잡담, 분류 어려운 것 |
+
+---
+
+## 🎯 작품 매칭 신뢰도
+
+| 표시 | 의미 |
+|------|------|
+| **정확** | 번호+이름 둘 다 DB와 일치 ✅ |
+| **이름매칭** | 번호는 다른데 이름이 일치 → DB의 정확한 번호로 정정 |
+| **번호매칭** | 번호만 있고 이름은 없음 |
+| **유사** | 오타 가능성 → 가장 비슷한 작품으로 추정 |
+| **없음** | 작품 정보를 못 찾음 (예: 답글 "확인했습니다") |
+
+---
+
+## 📈 지금까지 모은 데이터
+
+| 항목 | 수치 |
+|------|------|
+| 기간 | 2024년 2월 ~ 2026년 5월 (약 **2년 3개월**) |
+| 전체 행 | **14,346개** |
+| 사람 메시지 | 2,767개 |
+| 사람 답글 | 11,579개 |
+| 이미지 | 2,519장 (103 MB) |
+| 작품 DB | 2,009개 |
+| AI 분류 진행 | 3,332개 (다음 주 완료 예정) |
+
+---
+
+## 🆓 비용
+
+**전부 무료** 사용 중:
+- Slack API
+- Google Sheets
+- Supabase Storage (1GB 무료, 현재 10% 사용)
+- Google Gemini AI (무료 한도 내)
+- GitHub Actions (자동 실행 무료)
+
+---
+
+## 🔄 매일 어떻게 실행돼?
 
 ```mermaid
 flowchart TB
-    A[작품 DB 로드<br/>작품정보 탭 2,009행] --> B[작품 인덱스 빌드<br/>byNumber: Map&lt;번호,이름&gt;<br/>byNormName: Map&lt;정규화이름, 작품&gt;]
-    C[시트 메시지 읽기<br/>이미 분류된 건 스킵] --> D[배치 100개씩 묶기]
-    B --> E
-    D --> E[Gemini 프롬프트 생성<br/>각 메시지 + 부모메시지]
-    E --> F[Gemini API 호출<br/>gemini-2.5-flash]
-    F --> G[JSON 응답 파싱]
-    G --> H[로컬 작품 매칭]
-    H --> I{매칭 결과}
-    I -->|번호+이름 둘다 OK| J1[정확]
-    I -->|이름만 일치| J2[이름매칭]
-    I -->|번호만 일치| J3[번호매칭]
-    I -->|Levenshtein 거리 ≤ 2| J4[유사]
-    I -->|매칭 실패| J5[없음]
-    J1 --> K[progress 저장]
-    J2 --> K
-    J3 --> K
-    J4 --> K
-    J5 --> K
-    K --> L[batchUpdate로 시트 M~Q 컬럼 쓰기]
+    A["⏰ 매일 새벽 2시"] --> B["GitHub Actions<br/>자동 실행"]
+    B --> C["1️⃣ 메시지 수집<br/>(어제+오늘)"]
+    C --> D["2️⃣ 이미지 처리"]
+    D --> E["3️⃣ AI 분류"]
+    E --> F["✅ 시트 업데이트"]
+    F --> G["📧 끝!"]
 ```
 
-**Gemini가 추출하는 것:**
-- **Category** (8가지): 원고/PSD, 일정/스케줄, 메타/작가, 라이센스/계약, 현지화/번역, BM/타입변경, 런칭/오픈, 기타
-- **Sub Category**: 카테고리 내 세부 (예: 누락 페이지, 휴재, 작가 변경)
-- **작품번호 후보** (메시지에서 추출)
-- **작품명 후보**
-
-**로컬 매칭 단계 (정확도 향상):**
-1. 추출된 번호 + 이름 → DB에서 동시에 일치하면 `정확`
-2. 번호 오타 의심 → 이름으로 DB 검색 → `이름매칭`
-3. 이름 오타 의심 → Levenshtein 거리 ≤ 2 → `유사`
-4. 매칭 안 됨 → `없음`
+- 컴퓨터 꺼져있어도 **클라우드에서 자동 실행**
+- 매일 새 메시지 **10-50개 정도**만 처리 (1-2분)
+- 한번 실패해도 다음 날 자동으로 빠진 거 채워줌
 
 ---
 
-## 4. 📑 Google Sheets 구조
+## 💡 앞으로 할 것
 
-### "Slack" 탭 — 메인 데이터 (현재 14,346행)
-
-| 컬럼 | 이름 | 예시 | 출처 |
-|------|------|------|------|
-| A | Is Reply | `TRUE` / `FALSE` | 수집 단계 |
-| B | Channel | `작품관련소통_contentscomms` | 수집 단계 |
-| C | Sender | `홍길동` | 수집 단계 |
-| D | Date | `2026-05-21` | 수집 단계 |
-| E | Time | `14:30:22` | 수집 단계 |
-| F | Message | `8730 부녀회장 회차 누락...` | 수집 단계 |
-| G | Link | `https://thetoomics.slack.com/...` | 수집 단계 |
-| H | Parent Message | (답글일 때) `8730 부녀회장 작가 변경` | 수집 단계 |
-| I | Parent Link | (답글일 때) 부모 permalink | 수집 단계 |
-| J | Image URLs | `["https://supabase.../F08M.webp"]` | 이미지 마이그레이션 단계 |
-| K | Image Count | `1` / `3` | 수집 단계 |
-| L | Image Sizes (MB) | `2.45` (모든 이미지 합) | 수집 단계 |
-| M | Category | `원고/PSD` | AI 분류 단계 |
-| N | Sub Category | `누락 페이지` | AI 분류 단계 |
-| O | 작품번호 | `8730` | AI 분류 + 매칭 단계 |
-| P | 작품명 | `부녀회장` | AI 분류 + 매칭 단계 |
-| Q | 작품매칭 | `정확` / `이름매칭` / `유사` / `없음` | 로컬 매칭 단계 |
-
-### "작품정보" 탭 — 작품 DB
-
-- IMPORTRANGE로 외부 시트와 연결됨
-- A: 작품번호, B: 작품명
-- 현재 2,009개 작품
-- 외부 소스 업데이트되면 자동 반영
-
-### "Slack 로그" 탭 — 실행 기록
-
-| 컬럼 | 이름 |
-|------|------|
-| A | 실행일 |
-| B | 실행 시간 |
-| C | 소요 시간 |
-| D | 모드 (전체/증분) |
-| E | 신규 메시지 |
-| F | 신규 답글 |
+- [ ] AI 분류 마무리 (남은 11,000개)
+- [ ] **대시보드 만들기** — 시트 보지 않고 웹에서 검색/필터/시각화
+- [ ] 작품별 이슈 트렌드 시각화
+- [ ] 자동 알림 (특정 이슈 발생 시)
 
 ---
 
-## 5. 🗂 코드 구조
+## ❓ 자주 묻는 질문
 
-```
-HUB/
-├── src/
-│   ├── config/index.ts                  # 환경변수 로딩
-│   ├── engine/SyncEngine.ts             # 수집 오케스트레이션
-│   ├── jobs/incrementalSync.ts          # 진입점 (매일 실행)
-│   ├── services/
-│   │   ├── slack/
-│   │   │   ├── SlackClient.ts          # Slack API 래퍼
-│   │   │   ├── SlackCollector.ts        # 채널 히스토리 수집
-│   │   │   ├── MessageNormalizer.ts     # 텍스트 정제, 멘션 변환
-│   │   │   └── RateLimiter.ts           # Slack rate limit 처리
-│   │   └── sheets/
-│   │       ├── SheetsClient.ts          # Google Sheets API 래퍼
-│   │       └── SheetsWriter.ts          # 행 추가, 헤더 보장
-│   ├── types/slack.ts                   # 타입 정의
-│   └── utils/
-│       ├── dateUtils.ts                 # KST 날짜 포맷
-│       ├── textUtils.ts                 # 메시지 정제
-│       ├── logger.ts                    # 로깅
-│       └── sleep.ts
-├── scripts/
-│   ├── migrateImagesToSupabase.ts       # 이미지 다운+WebP+업로드
-│   ├── enrichMessages.ts                # Gemini 분류 + 작품 매칭
-│   ├── clearSheet.ts                    # 데이터 초기화
-│   ├── verifyData.ts                    # 시트 vs Slack 검증
-│   ├── findOldest.ts                    # 첫 메시지 찾기
-│   ├── analyzeImages.ts                 # 이미지 용량 분석
-│   ├── estimateWebP.ts                  # WebP 압축률 측정
-│   └── (기타 분석/디버깅 스크립트들)
-├── .github/workflows/daily-sync.yml     # 매일 자동 실행
-├── data/                                # 진행 상태 (gitignore)
-└── .env                                 # 비밀 (gitignore)
-```
+**Q. 새 메시지는 언제 시트에 들어와요?**
+→ 매일 새벽 2시 자동으로. 즉시 필요하면 수동 실행 가능.
+
+**Q. 봇 알림이 시트에 안 보여요?**
+→ 봇 메시지는 자동으로 제외함 (`B098BGM0L15` 같은 자동 알림은 사람 대화 아니라서).
+
+**Q. AI 분류가 틀렸어요. 어떻게 하죠?**
+→ 시트에서 직접 수정 가능. 다음 자동 실행에서 덮어쓰지 않아요.
+
+**Q. 작품 DB 업데이트는 어떻게 돼요?**
+→ "작품정보" 탭이 외부 DB와 자동 연결돼 있어서 항상 최신.
+
+**Q. 이미지가 갑자기 안 보여요?**
+→ Supabase 무료 한도(1GB) 넘어가면 작동 안 함. 현재 10%라 여유 있음.
 
 ---
 
-## 6. 🔁 데이터 흐름 — 메시지 1개의 여정
-
-```mermaid
-journey
-    title 한 Slack 메시지의 여정
-    section 수집
-      Slack에 글 작성: 5: 사용자
-      conversations.history fetch: 4: 시스템
-      봇/시스템 필터: 3: 시스템
-      텍스트 정제(@team 변환): 4: 시스템
-      이미지 URL 추출: 4: 시스템
-      시트 J열 임시 저장(Slack URL): 3: 시스템
-    section 이미지 처리
-      Slack에서 다운로드: 3: 시스템
-      WebP 변환(-88%): 5: 시스템
-      Supabase 업로드: 4: 시스템
-      시트 J열 교체(공개 URL): 5: 시스템
-    section AI 분류
-      Gemini 프롬프트 전송: 4: 시스템
-      Category 분류: 4: AI
-      작품번호명 추출: 3: AI
-      로컬 DB 퍼지매칭: 4: 시스템
-      시트 M~Q 쓰기: 5: 시스템
-    section 대시보드
-      시트 데이터 조회: 5: 대시보드
-      이미지 표시: 5: 사용자
-```
-
----
-
-## 7. 🔐 외부 서비스 & 비용
-
-| 서비스 | 용도 | 무료 한도 | 현재 사용량 |
-|--------|------|-----------|-------------|
-| **Slack API** | 메시지/답글/이미지 | 무제한 (rate limit 있음) | ~3500 req/일 |
-| **Google Sheets API** | 데이터 저장/조회 | 일 100,000 req | 일 ~200 |
-| **Supabase Storage** | 이미지 호스팅 | **1 GB 무료** | **103 MB** (10%) |
-| **Google Gemini AI** | 메시지 분류 | flash: 250 req/일 무료 | 일 ~10 req (증분) |
-| **GitHub Actions** | 자동화 실행 | 월 2000분 무료 | 월 ~300분 |
-
-**총 비용: 무료** 🎉
-
----
-
-## 8. 🔑 환경 변수 (GitHub Secrets)
-
-| Secret | 설명 |
-|--------|------|
-| `SLACK_BOT_TOKEN` | Slack User OAuth Token (xoxp-...) |
-| `SLACK_TARGET_CHANNEL_ID` | 수집할 채널 ID |
-| `SLACK_EXCLUDED_USER_IDS` | 제외할 유저 (선택) |
-| `GOOGLE_SERVICE_ACCOUNT_KEY_BASE64` | Sheets 접근용 base64 |
-| `GOOGLE_SHEETS_SPREADSHEET_ID` | HUB 시트 ID |
-| `SUPABASE_URL` | Supabase 프로젝트 URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase 관리 키 |
-| `SUPABASE_STORAGE_BUCKET` | 버킷명 (slack-images) |
-| `GOOGLE_AI_API_KEY` | Gemini API 키 |
-
----
-
-## 9. 🔧 진행 상태 보존 (`data/`)
-
-3개의 JSON 파일로 **재시작 가능한 작업** 구현:
-
-| 파일 | 용도 |
-|------|------|
-| `sync-state.json` | 마지막 동기화 시각 → 증분 수집 |
-| `image-migration.json` | `{slack_url → supabase_url}` 매핑 |
-| `enrich-progress.json` | `{시트행번호 → 분류결과}` |
-
-→ 모두 GitHub Actions 캐시에 저장돼서 다음 실행 때 복원됨
-
----
-
-## 10. ⚙️ Slack API Rate Limit 대응
-
-`RateLimiter.ts`에 **Token Bucket 알고리즘** 구현:
-
-| API Tier | 한도 | 우리 정책 |
-|----------|------|-----------|
-| Tier 2 (search.messages) | 15/min | 보수적, 안 씀 |
-| Tier 3 (conversations.*) | 40/min | 토큰 10개 capacity |
-| Tier 4 (users.info, auth) | 80/min | 토큰 10개 capacity |
-
-- 429 응답 시 자동 retry (exponential backoff)
-- 페이지네이션 시 300ms 대기
-
----
-
-## 11. 🧪 검증 & 디버깅 스크립트
-
-| 스크립트 | 용도 |
-|----------|------|
-| `verifyData.ts` | Slack 실제 카운트 vs 시트 카운트 비교 |
-| `finalVerify.ts` | 봇/빈 메시지 필터링 후 정확 매칭 검증 |
-| `diagnoseReplies.ts` | 스레드별 답글 누락 분석 |
-| `analyzeImages.ts` | 시트의 이미지 용량 통계 |
-| `analyzeReplies.ts` | 답글 봇 비율 샘플링 |
-| `estimateWebP.ts` | WebP 압축률 실측 |
-| `inspectThread.ts` | 특정 스레드 상세 분석 |
-| `showFiltered.ts` | 필터링된 봇/시스템 메시지 예시 |
-
----
-
-## 12. 📈 현재 데이터 현황 (2026-05-25 기준)
-
-| 항목 | 값 |
-|------|-----|
-| 채널 기간 | 2024-02-21 ~ 2026-05-22 (약 2년 3개월) |
-| 총 행 수 | **14,346** |
-| 부모 메시지 | 2,767개 |
-| 답글 | 11,579개 |
-| 이미지 (고유) | 2,519장 |
-| 이미지 용량 | 103.39 MB (WebP) |
-| 작품 DB | 2,009개 |
-| AI 분류 완료 | 3,332개 (23%) — 나머지 내일 Gemini quota 리셋 후 |
-
----
-
-## 13. 🚀 다음 단계 (향후 계획)
-
-- [ ] 남은 11,000개 AI 분류 완료
-- [ ] **대시보드 프론트엔드** (Next.js + Supabase 직접 조회)
-- [ ] PostgreSQL DB 마이그레이션 (옵션 — 시트가 무겁다면)
-- [ ] 분류 통계 / 작품별 이슈 트렌드 시각화
-
----
-
-**문의:** 코드 관련 질문은 슬랙 또는 GitHub Issues로!
+문의나 요청은 슬랙으로 알려주세요! 🙌
