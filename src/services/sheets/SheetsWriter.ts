@@ -78,13 +78,47 @@ export class SheetsWriter {
   async ensureLogHeader(spreadsheetId: string, logTabName: string): Promise<void> {
     await this.client.ensureTabExists(spreadsheetId, logTabName);
 
-    const range = `'${logTabName}'!A1:F1`;
+    const range = `'${logTabName}'!A1:H1`;
     const existing = await this.client.getRange(spreadsheetId, range);
-    if (existing.length > 0 && existing[0][0] === '실행일' && existing[0].length >= 6) return;
+    if (existing.length > 0 && existing[0][0] === '실행일' && existing[0].length >= 8) return;
 
     await this.client.updateRange(spreadsheetId, range, [[
-      '실행일', '실행 시간', '소요 시간', '모드', '신규 메시지', '신규 답글',
+      '실행일', '실행 시간', '소요 시간', '모드',
+      '신규 메시지', '신규 답글', '분류됨', '분류 실패',
     ]]);
+  }
+
+  async appendEnrichLogRow(
+    spreadsheetId: string,
+    logTabName: string,
+    entry: { startedAt: Date; finishedAt: Date; classified: number; failed: number }
+  ): Promise<void> {
+    await this.ensureLogHeader(spreadsheetId, logTabName);
+
+    const durationSec = Math.round((entry.finishedAt.getTime() - entry.startedAt.getTime()) / 1000);
+    const durationStr = durationSec >= 60
+      ? `${Math.floor(durationSec / 60)}분 ${durationSec % 60}초`
+      : `${durationSec}초`;
+
+    const kstDate = new Date(entry.startedAt.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+    const yyyy = kstDate.getFullYear();
+    const mm = String(kstDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(kstDate.getDate()).padStart(2, '0');
+    const hh = String(kstDate.getHours()).padStart(2, '0');
+    const min = String(kstDate.getMinutes()).padStart(2, '0');
+    const ss = String(kstDate.getSeconds()).padStart(2, '0');
+
+    await this.client.appendRows(spreadsheetId, `'${logTabName}'`, [[
+      `${yyyy}-${mm}-${dd}`,
+      `${hh}:${min}:${ss}`,
+      durationStr,
+      'AI 분류',
+      '', // 신규 메시지 빈칸 (분류 작업이라)
+      '', // 신규 답글 빈칸
+      String(entry.classified),
+      String(entry.failed),
+    ]]);
+    logger.info({ logTabName, classified: entry.classified, failed: entry.failed }, 'Enrich log row appended');
   }
 
   async appendLogRow(spreadsheetId: string, logTabName: string, entry: SyncLogEntry): Promise<void> {

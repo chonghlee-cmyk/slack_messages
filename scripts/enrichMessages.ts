@@ -237,6 +237,10 @@ async function ensureHeaders(spreadsheetId: string, tab: string) {
 }
 
 async function main() {
+  const runStart = new Date();
+  let classifiedCount = 0;
+  let failedBatches = 0;
+
   const apiKey = process.env.GOOGLE_AI_API_KEY!;
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
@@ -247,6 +251,7 @@ async function main() {
   const sheets = new SheetsClient();
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID!;
   const tab = process.env.GOOGLE_SHEETS_OUTPUT_TAB ?? 'Slack';
+  const logTab = process.env.GOOGLE_SHEETS_LOG_TAB ?? 'Slack 로그';
 
   console.log('1. 작품 DB 로드...');
   const dbRows = await sheets.getRange(spreadsheetId, `'작품정보'!A:B`);
@@ -302,9 +307,11 @@ async function main() {
           titleName: name || null,
           titleMatch: conf,
         };
+        classifiedCount++;
       }
       saveProgress(progress);
     } catch (e: any) {
+      failedBatches++;
       console.error(`\n  배치 ${i/BATCH_SIZE+1} 실패: ${e.message?.slice(0, 100)}`);
     }
     const done = i + batch.length;
@@ -351,6 +358,15 @@ async function main() {
   Object.entries(stats.category).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
   console.log('\n═══ 작품 매칭 ═══');
   Object.entries(stats.match).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
+
+  // === 로그 탭에 실행 기록 추가 ===
+  const writer = new (await import('../src/services/sheets/SheetsWriter')).SheetsWriter(sheets);
+  await writer.appendEnrichLogRow(spreadsheetId, logTab, {
+    startedAt: runStart,
+    finishedAt: new Date(),
+    classified: classifiedCount,
+    failed: failedBatches,
+  });
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
