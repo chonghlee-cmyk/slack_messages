@@ -20,10 +20,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json');
-const BATCH_SIZE = 10;                                           // 10개씩 처리 후 즉시 시트에 기록
+const BATCH_SIZE = 50;                                           // 50개씩 처리 후 즉시 시트에 기록 (API 호출 효율 + 진행 가시성 균형)
 const RPM = 6;                                                   // 보수적: 무료 한도 10의 60%만 사용
 const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;          // ~10.5초 간격
-const MAX_BATCHES_PER_RUN = 400;                                 // 400배치 × 10 = 4000개/일
+const MAX_BATCHES_PER_RUN = 80;                                  // 80배치 × 50 = 4000개/일
 const KEY_EXHAUSTED_THRESHOLD = 3;                              // 연속 N번 quota 실패 시 키 소진 판단
 const RPM_COOLDOWN_MS = 5 * 60 * 1000;                          // 일시 한도 의심 시 5분 대기
 
