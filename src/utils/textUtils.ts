@@ -32,5 +32,13 @@ export function cleanMessageText(
     .replace(/:[a-z0-9_\-+]+:/g, match => nodeEmoji.get(match) ?? match)
     // 연속 줄바꿈 정리
     .replace(/\n{3,}/g, '\n\n')
+    // HTML entity 디코딩 (Slack은 사용자 입력의 <, >, & 를 &lt; &gt; &amp; 로 escape함)
+    // 주의: Slack 특수 마커 <@U123> 등은 이미 위에서 처리됐으므로 안전
+    // &amp; 는 마지막 (이중 디코딩 방지)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
     .trim();
 }

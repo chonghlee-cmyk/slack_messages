@@ -101,8 +101,9 @@ interface RawExtraction {
 
 function normalize(s: string): string {
   return s
-    .replace(/\[글로벌\s*전용\]/gi, '')
-    .replace(/\[.*?\]/g, '')
+    // [xxx 전용] 만 제거 → 같은 작품 취급 (영어/글로벌/일본어/중국어 전용 등 언어 변형 합쳐짐)
+    .replace(/\[[^\]]*전용\]/gi, '')
+    // 다른 [] 는 그대로 유지 ([번역용], [개정판], [성인], [일반], [외전], [무검열] = 별개 작품)
     .replace(/\(.*?\)/g, '')
     .replace(/[{}「」『』〈〉【】<>"']/g, '')
     .replace(/시즌\s*\d+/gi, '')
@@ -134,67 +135,67 @@ function buildTitleIndex(rows: string[][]) {
   for (const r of rows.slice(1)) {
     const num = (r[0] ?? '').trim();
     const name = (r[1] ?? '').trim();
-    if (num && name) {
-      byNumber.set(num, name);
-      const key = normalize(name);
-      if (!byNormName.has(key)) byNormName.set(key, []);
-      byNormName.get(key)!.push({ num, name });
-    }
+    if (!num || !name) continue;
+    // [번역용] 작품은 매칭 대상에서 제외 (출력하지 않음)
+    if (/\[번역용\]/i.test(name)) continue;
+    byNumber.set(num, name);
+    const key = normalize(name);
+    if (!byNormName.has(key)) byNormName.set(key, []);
+    byNormName.get(key)!.push({ num, name });
   }
   return { byNumber, byNormName };
 }
 
-// 매칭 결과: 같은 이름의 여러 언어권 작품 모두 반환
+// 매칭 결과: 번호 매칭 + 이름 매칭 합집합 (번호 기준 dedup)
+// - 번호와 이름이 다른 작품을 가리키면 둘 다 반환 → 행 복사
+// - 같은 정규화 이름의 여러 언어 변형도 모두 반환 → 행 복사
 function matchWork(
   work: { tn: string | null; name: string | null },
   index: ReturnType<typeof buildTitleIndex>
 ): Array<{ num: string; name: string; conf: AdditionalWork['titleMatch'] }> {
+  const results = new Map<string, { num: string; name: string; conf: AdditionalWork['titleMatch'] }>();
   const numRaw = work.tn?.replace(/[^0-9]/g, '') ?? '';
   const nameRaw = work.name ?? '';
+  const nmNorm = nameRaw ? normalize(nameRaw) : '';
 
-  // 1) 번호 + 이름 → 정확 매칭 우선
-  if (numRaw && nameRaw) {
-    const dbName = index.byNumber.get(numRaw);
-    const nmNorm = normalize(nameRaw);
-    if (dbName && normalize(dbName) === nmNorm) {
-      // 정확 매칭된 작품 + 같은 정규화 이름의 다른 언어권 작품들
-      const allMatches = index.byNormName.get(nmNorm) ?? [];
-      const primary = { num: numRaw, name: dbName, conf: '정확' as const };
-      const others = allMatches
-        .filter(e => e.num !== numRaw)
-        .map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
-      return [primary, ...others];
-    }
-    // 번호는 있는데 이름이 다르면 → 이름으로 검색
-    const byName = index.byNormName.get(nmNorm);
-    if (byName && byName.length > 0) {
-      return byName.map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
-    }
-  }
-  // 2) 이름만
-  if (nameRaw) {
-    const nmNorm = normalize(nameRaw);
-    const byName = index.byNormName.get(nmNorm);
-    if (byName && byName.length > 0) {
-      return byName.map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
-    }
-    // 퍼지: 가장 가까운 정규화 이름
-    let best: { norm: string; dist: number } | null = null;
-    for (const norm of index.byNormName.keys()) {
-      const d = levenshtein(nmNorm, norm);
-      const threshold = Math.max(2, Math.floor(norm.length * 0.2));
-      if (d <= threshold && (!best || d < best.dist)) best = { norm, dist: d };
-    }
-    if (best) {
-      const entries = index.byNormName.get(best.norm) ?? [];
-      return entries.map(e => ({ num: e.num, name: e.name, conf: '유사' as const }));
-    }
-  }
-  // 3) 번호만
+  // 1) 번호 매칭
   if (numRaw && index.byNumber.has(numRaw)) {
-    return [{ num: numRaw, name: index.byNumber.get(numRaw)!, conf: '번호매칭' as const }];
+    const dbName = index.byNumber.get(numRaw)!;
+    const conf: AdditionalWork['titleMatch'] =
+      nmNorm && normalize(dbName) === nmNorm ? '정확' : '번호매칭';
+    results.set(numRaw, { num: numRaw, name: dbName, conf });
   }
-  return [{ num: '', name: '', conf: '없음' as const }];
+
+  // 2) 이름 매칭 (정규화 정확 일치) — 번호 결과와 다른 작품일 수 있음
+  if (nmNorm) {
+    const byName = index.byNormName.get(nmNorm);
+    if (byName && byName.length > 0) {
+      for (const e of byName) {
+        if (!results.has(e.num)) {
+          results.set(e.num, { num: e.num, name: e.name, conf: '이름매칭' });
+        }
+      }
+    } else {
+      // 3) 퍼지 fallback (이름 정확 매칭 안 될 때만)
+      let best: { norm: string; dist: number } | null = null;
+      for (const norm of index.byNormName.keys()) {
+        const d = levenshtein(nmNorm, norm);
+        const threshold = Math.max(2, Math.floor(norm.length * 0.2));
+        if (d <= threshold && (!best || d < best.dist)) best = { norm, dist: d };
+      }
+      if (best) {
+        const entries = index.byNormName.get(best.norm) ?? [];
+        for (const e of entries) {
+          if (!results.has(e.num)) {
+            results.set(e.num, { num: e.num, name: e.name, conf: '유사' });
+          }
+        }
+      }
+    }
+  }
+
+  if (results.size === 0) return [{ num: '', name: '', conf: '없음' as const }];
+  return [...results.values()];
 }
 
 // === Progress ===
