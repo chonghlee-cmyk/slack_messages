@@ -21,9 +21,11 @@ import * as path from 'path';
 
 const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json');
 const BATCH_SIZE = 10;                                           // 10개씩 처리 후 즉시 시트에 기록
-const RPM = 10;                                                  // gemini-2.5-flash 무료 티어 한도
-const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;          // 6.5초 간격
+const RPM = 6;                                                   // 보수적: 무료 한도 10의 60%만 사용
+const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;          // ~10.5초 간격
 const MAX_BATCHES_PER_RUN = 400;                                 // 400배치 × 10 = 4000개/일
+const KEY_EXHAUSTED_THRESHOLD = 3;                              // 연속 N번 quota 실패 시 키 소진 판단
+const RPM_COOLDOWN_MS = 5 * 60 * 1000;                          // 일시 한도 의심 시 5분 대기
 
 const args = process.argv.slice(2);
 const LIMIT = args.find(a => a.startsWith('--limit='))?.split('=')[1];
@@ -273,6 +275,7 @@ async function main() {
     });
   });
   const keyExhausted = new Array(models.length).fill(false);
+  const keyQuotaFails = new Array(models.length).fill(0);  // 키별 연속 quota 실패 횟수
   let currentKeyIdx = 0;
 
   function getActiveModel(): { model: any; keyIdx: number } | null {
@@ -449,31 +452,45 @@ async function main() {
 
       saveProgress(progress);
       consecutiveFails = 0;
+      keyQuotaFails[active.keyIdx] = 0;  // 성공 시 해당 키 실패 카운터 리셋
 
     } catch (e: any) {
       failedBatches++;
-      // 진짜 quota 소진 = 명확한 429 신호만 (네트워크 오류와 구분)
-      const isDefinitelyQuota =
+      // 429/quota 신호 감지
+      const isQuotaSignal =
         e?.status === 429 ||
         (e?.message ?? '').includes('RESOURCE_EXHAUSTED') ||
-        ((e?.message ?? '').includes('429') && (e?.message ?? '').includes('quota'));
+        (e?.message ?? '').includes('429');
 
-      if (isDefinitelyQuota) {
-        keyExhausted[active.keyIdx] = true;
-        console.error(`\n  ⚠️ 키 ${active.keyIdx + 1} 일일 할당량 소진 → 다음 키로 전환`);
-        const next = getActiveModel();
-        if (!next) {
-          console.error('  ❌ 모든 API 키 할당량 소진. 오늘 중단, 내일 재개.');
-          break;
+      if (isQuotaSignal) {
+        keyQuotaFails[active.keyIdx]++;
+        const failCount = keyQuotaFails[active.keyIdx];
+
+        if (failCount >= KEY_EXHAUSTED_THRESHOLD) {
+          // 연속 N번 실패 → 진짜 일일 할당량(RPD) 소진으로 판단
+          keyExhausted[active.keyIdx] = true;
+          console.error(`\n  ⚠️ 키 ${active.keyIdx + 1} 연속 ${failCount}번 quota 실패 → 일일 할당량 소진으로 판단, 다음 키로 전환`);
+          const next = getActiveModel();
+          if (!next) {
+            console.error('  ❌ 모든 API 키 할당량 소진. 오늘 중단, 내일 재개.');
+            break;
+          }
+          console.error(`  ✅ 키 ${next.keyIdx + 1}로 전환, 재시도`);
+          i -= BATCH_SIZE;
+          batchNum--;
+          consecutiveFails = 0;
+        } else {
+          // 1~2번째 실패: RPM(분당 한도) 의심 → 5분 대기 후 같은 키 재시도
+          console.error(`\n  ⏸️ 키 ${active.keyIdx + 1} 일시 한도 (${failCount}/${KEY_EXHAUSTED_THRESHOLD}) → 5분 대기 후 같은 키 재시도`);
+          await new Promise(r => setTimeout(r, RPM_COOLDOWN_MS));
+          i -= BATCH_SIZE;
+          batchNum--;
+          consecutiveFails = 0;
         }
-        console.error(`  ✅ 키 ${next.keyIdx + 1}로 전환, 재시도`);
-        i -= BATCH_SIZE; // 이 배치 다시 시도
-        batchNum--;
-        consecutiveFails = 0;
       } else {
-        // 네트워크 오류 등 일시적 오류
+        // 네트워크 오류 등 진짜 일시적 오류
         consecutiveFails++;
-        console.error(`\n  배치 ${batchNum} 실패 (일시적 오류): ${e.message?.slice(0, 100)}`);
+        console.error(`\n  배치 ${batchNum} 실패 (네트워크?): ${e.message?.slice(0, 100)}`);
         if (consecutiveFails >= 5) {
           console.error(`\n  ❌ 연속 5회 실패. 네트워크 문제일 수 있음. 오늘 중단, 내일 재개.`);
           break;
