@@ -258,12 +258,30 @@ async function main() {
   let classifiedCount = 0;
   let failedBatches = 0;
 
-  const apiKey = process.env.GOOGLE_AI_API_KEY!;
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+  // API 키 목록 (소진된 키는 자동으로 다음 키로 전환)
+  const apiKeys = [
+    process.env.GOOGLE_AI_API_KEY,
+    process.env.GOOGLE_AI_API_KEY_2,
+  ].filter(Boolean) as string[];
+  console.log(`   API 키 ${apiKeys.length}개 준비`);
+
+  const models = apiKeys.map(key => {
+    const genAI = new GoogleGenerativeAI(key);
+    return genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+    });
   });
+  const keyExhausted = new Array(models.length).fill(false);
+  let currentKeyIdx = 0;
+
+  function getActiveModel(): { model: any; keyIdx: number } | null {
+    for (let i = 0; i < models.length; i++) {
+      const idx = (currentKeyIdx + i) % models.length;
+      if (!keyExhausted[idx]) return { model: models[idx], keyIdx: idx };
+    }
+    return null; // 모든 키 소진
+  }
 
   const sheets = new SheetsClient();
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID!;
@@ -351,8 +369,15 @@ async function main() {
     const batch = items.slice(i, i + BATCH_SIZE);
     batchNum++;
 
+    // 활성 키 선택
+    const active = getActiveModel();
+    if (!active) {
+      console.error('\n  ❌ 모든 API 키 할당량 소진. 오늘 중단, 내일 재개.');
+      break;
+    }
+
     try {
-      const raws = await callGemini(model, batch);
+      const raws = await callGemini(active.model, batch);
 
       // 이번 배치 시트 업데이트 준비
       const sheetUpdates: { range: string; values: string[][] }[] = [];
@@ -427,11 +452,29 @@ async function main() {
 
     } catch (e: any) {
       failedBatches++;
-      consecutiveFails++;
-      console.error(`\n  배치 ${batchNum} 실패: ${e.message?.slice(0, 100)}`);
-      if (consecutiveFails >= 5) {
-        console.error(`\n  ❌ 연속 5회 실패 → 할당량 소진. 오늘 중단, 내일 재개.`);
-        break;
+      const isQuota = e?.status === 429 || (e?.message ?? '').includes('429') ||
+        (e?.message ?? '').includes('quota') || (e?.message ?? '').includes('RESOURCE_EXHAUSTED');
+
+      if (isQuota) {
+        keyExhausted[active.keyIdx] = true;
+        console.error(`\n  ⚠️ 키 ${active.keyIdx + 1} 할당량 소진 → 다음 키로 전환`);
+        // 다른 키 있는지 확인
+        const next = getActiveModel();
+        if (!next) {
+          console.error('  ❌ 모든 API 키 할당량 소진. 오늘 중단, 내일 재개.');
+          break;
+        }
+        console.error(`  ✅ 키 ${next.keyIdx + 1}로 전환, 재시도`);
+        i -= BATCH_SIZE; // 이 배치 다시 시도
+        batchNum--;
+        consecutiveFails = 0;
+      } else {
+        consecutiveFails++;
+        console.error(`\n  배치 ${batchNum} 실패: ${e.message?.slice(0, 100)}`);
+        if (consecutiveFails >= 5) {
+          console.error(`\n  ❌ 연속 5회 실패. 오늘 중단, 내일 재개.`);
+          break;
+        }
       }
     }
 
