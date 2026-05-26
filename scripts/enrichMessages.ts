@@ -1,12 +1,8 @@
 /**
  * Gemini로 메시지 enrich:
- *   - Level (1-5)
- *   - Sub Level (4-1 to 4-5)
- *   - Category (이슈 타입)
- *   - Sub Category (이슈 세부)
- *   - 작품번호 후보
- *   - 작품명 후보
- * 로컬에서 DB 퍼지 매칭 → 작품 매칭 신뢰도 결정
+ *   - Category, Sub Category
+ *   - 작품번호, 작품명, 작품매칭
+ *   - 다중 작품 언급 시 각각 별도 행으로 추가 (Option 2)
  *
  * 사용:
  *   npx ts-node scripts/enrichMessages.ts                  # 전체
@@ -48,24 +44,36 @@ B) SUB CATEGORY (Category 내 세부):
   - 런칭/오픈: "신규 런칭", "무검열 런칭"
   - 기타: null 가능
 
-C) 작품번호 (메시지에서 추출. 3-5자리 숫자. 못 찾으면 null)
-D) 작품명 (메시지에서 추출. 못 찾으면 null)
+C) 작품 목록 (메시지에서 언급된 모든 작품):
+  - 각 작품의 번호(3-5자리 숫자)와 이름을 배열로 추출
+  - 작품이 하나면 배열에 하나, 여럿이면 모두 포함
+  - 작품을 찾을 수 없으면 [{"tn":null,"name":null}]
 
 답글이면 "[부모: ...]" 텍스트도 활용해서 작품/맥락 파악하세요.
 괄호/특수문자 무시: "(시즌2)", "[8730]" 등에서 핵심만 추출.
 
 오직 JSON 배열로 답하세요. 마크다운/설명 금지.
-형식: [{"i":1,"c":"원고/PSD","sc":"누락 페이지","tn":"8730","name":"부녀회장"},{"i":2,"c":"기타","sc":null,"tn":null,"name":null}, ...]
+단일 작품: [{"i":1,"c":"원고/PSD","sc":"누락 페이지","works":[{"tn":"8730","name":"부녀회장"}]},...]
+다중 작품: [{"i":2,"c":"기타","sc":null,"works":[{"tn":"8071","name":"두근두근 공수교대"},{"tn":"9125","name":"다른작품"}]},...]
+없음:     [{"i":3,"c":"기타","sc":null,"works":[{"tn":null,"name":null}]},...]
 
 분류할 메시지:
 `;
 
 interface Item {
-  rowIdx: number;
+  rowIdx: number;    // 시트 행 번호 (2부터), M-Q 업데이트용
+  permalink: string; // G컬럼, progress 키
+  rowData: string[]; // 원본 A-L 데이터 (12컬럼), 추가 행 생성용
   isReply: boolean;
   sender: string;
   message: string;
   parentText: string;
+}
+
+interface AdditionalWork {
+  titleNumber: string | null;
+  titleName: string | null;
+  titleMatch: '정확' | '이름매칭' | '번호매칭' | '유사' | '없음';
 }
 
 interface Enrichment {
@@ -74,13 +82,14 @@ interface Enrichment {
   titleNumber: string | null;
   titleName: string | null;
   titleMatch: '정확' | '이름매칭' | '번호매칭' | '유사' | '없음';
+  additionalWorks?: AdditionalWork[];  // 2번째 작품 이후
+  rowIdx: number;                      // 시트 행 번호 (저장용)
 }
 
 interface RawExtraction {
   category: string | null;
   subCategory: string | null;
-  titleNumberRaw: string | null;
-  titleNameRaw: string | null;
+  works: Array<{ tn: string | null; name: string | null }>;
 }
 
 // === DB 작품 매칭 ===
@@ -127,12 +136,12 @@ function buildTitleIndex(rows: string[][]) {
   return { byNumber, byNormName };
 }
 
-function matchTitle(
-  raw: RawExtraction,
+function matchWork(
+  work: { tn: string | null; name: string | null },
   index: ReturnType<typeof buildTitleIndex>
-): { num: string; name: string; conf: Enrichment['titleMatch'] } {
-  const numRaw = raw.titleNumberRaw?.replace(/[^0-9]/g, '') ?? '';
-  const nameRaw = raw.titleNameRaw ?? '';
+): { num: string; name: string; conf: AdditionalWork['titleMatch'] } {
+  const numRaw = work.tn?.replace(/[^0-9]/g, '') ?? '';
+  const nameRaw = work.name ?? '';
 
   // 1) 둘 다 있고 DB에 둘 다 일치
   if (numRaw && nameRaw) {
@@ -172,19 +181,19 @@ function matchTitle(
 
 // === 메인 ===
 
-function loadProgress(): Record<number, Enrichment> {
+function loadProgress(): Record<string, Enrichment> {
   if (RESET && fs.existsSync(PROGRESS_FILE)) fs.unlinkSync(PROGRESS_FILE);
   if (fs.existsSync(PROGRESS_FILE)) return JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf-8'));
   return {};
 }
 
-function saveProgress(p: Record<number, Enrichment>) {
+function saveProgress(p: Record<string, Enrichment>) {
   const dir = path.dirname(PROGRESS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p));
 }
 
-async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Map<number, RawExtraction>> {
+async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Map<string, RawExtraction>> {
   const lines = batch.map((it, i) => {
     const role = it.isReply ? '답글' : '메시지';
     const parent = it.parentText ? ` [부모: ${it.parentText.slice(0, 100)}]` : '';
@@ -201,15 +210,23 @@ async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Ma
       if (!m) throw new Error(`No JSON: ${text.slice(0, 200)}`);
       const parsed = JSON.parse(m[0]);
 
-      const out = new Map<number, RawExtraction>();
+      const out = new Map<string, RawExtraction>();
       for (const p of parsed) {
         const it = batch[(p.i ?? 0) - 1];
         if (!it) continue;
-        out.set(it.rowIdx, {
+
+        // works 배열 파싱 (신규 형식 우선, 구형 tn/name 폴백)
+        let works: Array<{ tn: string | null; name: string | null }>;
+        if (Array.isArray(p.works) && p.works.length > 0) {
+          works = p.works.map((w: any) => ({ tn: w.tn ?? null, name: w.name ?? null }));
+        } else {
+          works = [{ tn: p.tn ?? null, name: p.name ?? null }];
+        }
+
+        out.set(it.permalink, {
           category: p.c ?? null,
           subCategory: p.sc ?? null,
-          titleNumberRaw: p.tn ?? null,
-          titleNameRaw: p.name ?? null,
+          works,
         });
       }
       return out;
@@ -284,28 +301,53 @@ async function main() {
   const dataRows = rows.slice(1);
   console.log(`   ${dataRows.length}행`);
 
-  const progress = loadProgress();
-  let items: Item[] = [];
+  // permalink별 기존 행 수 카운트 (중복 행 추가 방지용)
+  const permalinkCount = new Map<string, number>();
+  for (const r of dataRows) {
+    const pl = (r[6] ?? '').trim();
+    if (pl) permalinkCount.set(pl, (permalinkCount.get(pl) ?? 0) + 1);
+  }
+
+  // permalink → Item 맵 (추가 행 생성 시 원본 데이터 조회용)
+  // 동일 permalink의 첫 번째 행(rowIdx 최솟값)만 사용
+  const itemByPermalink = new Map<string, Item>();
   for (let i = 0; i < dataRows.length; i++) {
     const r = dataRows[i];
     const rowIdx = i + 2;
-    if (progress[rowIdx]) continue;
-    const msg = (r[5] ?? '').trim();
-    if (!msg) {
-      progress[rowIdx] = {
+    const permalink = (r[6] ?? '').trim();
+    if (!permalink) continue;
+    if (!itemByPermalink.has(permalink)) {
+      // 최초 등장 행만 저장 (원본)
+      itemByPermalink.set(permalink, {
+        rowIdx,
+        permalink,
+        rowData: r.slice(0, 12),
+        isReply: r[0] === 'TRUE',
+        sender: r[2] ?? '',
+        message: (r[5] ?? '').trim(),
+        parentText: r[7] ?? '',
+      });
+    }
+  }
+
+  const progress = loadProgress();
+
+  // 아직 처리 안 된 고유 permalink 목록으로 items 구성
+  let items: Item[] = [];
+  for (const [permalink, item] of itemByPermalink) {
+    if (progress[permalink]) continue;  // 이미 처리됨
+    if (!item.message) {
+      // 메시지 없는 행은 기타로 즉시 처리
+      progress[permalink] = {
         category: '기타', subCategory: null,
         titleNumber: null, titleName: null, titleMatch: '없음',
+        rowIdx: item.rowIdx,
       };
       continue;
     }
-    items.push({
-      rowIdx,
-      isReply: r[0] === 'TRUE',
-      sender: r[2] ?? '',
-      message: msg,
-      parentText: r[7] ?? '',
-    });
+    items.push(item);
   }
+
   if (LIMIT) items = items.slice(0, Number(LIMIT));
   console.log(`   처리 대상: ${items.length}개 (이미 처리: ${Object.keys(progress).length})`);
 
@@ -321,20 +363,40 @@ async function main() {
   console.log(`\n4. Gemini 분류 (배치 ${BATCH_SIZE}, 분당 ${RPM})...`);
   const start = Date.now();
   let consecutiveFails = 0;
+  // 이번 실행에서 새로 처리된 항목 (추가 행 append용)
+  const newlyProcessed = new Map<string, Enrichment>();
+
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const t0 = Date.now();
     const batch = items.slice(i, i + BATCH_SIZE);
     try {
       const raws = await callGemini(model, batch);
-      for (const [rowIdx, raw] of raws) {
-        const { num, name, conf } = matchTitle(raw, titleIndex);
-        progress[rowIdx] = {
+      for (const [permalink, raw] of raws) {
+        // 첫 번째 작품 매칭
+        const firstWork = raw.works[0] ?? { tn: null, name: null };
+        const { num, name, conf } = matchWork(firstWork, titleIndex);
+
+        // 추가 작품 매칭 (2번째 이후)
+        const additionalWorks: AdditionalWork[] = raw.works.slice(1).map(w => {
+          const { num: n, name: nm, conf: c } = matchWork(w, titleIndex);
+          return { titleNumber: n || null, titleName: nm || null, titleMatch: c };
+        });
+
+        const item = itemByPermalink.get(permalink);
+        if (!item) continue;
+
+        const enrichment: Enrichment = {
           category: raw.category,
           subCategory: raw.subCategory,
           titleNumber: num || null,
           titleName: name || null,
           titleMatch: conf,
+          additionalWorks: additionalWorks.length > 0 ? additionalWorks : undefined,
+          rowIdx: item.rowIdx,
         };
+
+        progress[permalink] = enrichment;
+        newlyProcessed.set(permalink, enrichment);
         classifiedCount++;
       }
       saveProgress(progress);
@@ -360,11 +422,13 @@ async function main() {
     }
   }
 
-  console.log('\n\n5. 시트 업데이트 (M~S 컬럼, batch)...');
+  // === 5. 시트 업데이트: M~Q 컬럼 (기존 행) ===
+  console.log('\n\n5. 시트 업데이트 (M~Q 컬럼, batch)...');
   const updates: { range: string; values: string[][] }[] = [];
-  for (const [rowStr, e] of Object.entries(progress)) {
+  for (const [_key, e] of Object.entries(progress)) {
+    if (!e.rowIdx) continue;  // 구버전 progress(rowIdx 없음) 호환성
     updates.push({
-      range: `'${tab}'!M${rowStr}:Q${rowStr}`,
+      range: `'${tab}'!M${e.rowIdx}:Q${e.rowIdx}`,
       values: [[
         e.category ?? '',
         e.subCategory ?? '',
@@ -380,6 +444,46 @@ async function main() {
     console.log(`   batch ${Math.floor(i/CHUNK)+1} 완료`);
   }
 
+  // === 6. 추가 작품 행 append (다중 작품 언급 시) ===
+  const extraRowsToAppend: string[][] = [];
+  let multiWorkCount = 0;
+
+  for (const [permalink, e] of newlyProcessed) {
+    if (!e.additionalWorks || e.additionalWorks.length === 0) continue;
+
+    // 이미 추가 행이 존재하면 skip (중복 방지 — progress 유실 시 대비)
+    const existingCount = permalinkCount.get(permalink) ?? 1;
+    if (existingCount > 1) {
+      console.log(`   skip duplicate extra rows for ${permalink} (already ${existingCount} rows)`);
+      continue;
+    }
+
+    const origItem = itemByPermalink.get(permalink);
+    if (!origItem) continue;
+
+    for (const aw of e.additionalWorks) {
+      // A-L: 원본 행 데이터 복사, M-Q: 추가 작품 분류
+      const newRow: string[] = [
+        ...Array.from({ length: 12 }, (_, j) => origItem.rowData[j] ?? ''),
+        e.category ?? '',
+        e.subCategory ?? '',
+        aw.titleNumber ?? '',
+        aw.titleName ?? '',
+        aw.titleMatch,
+      ];
+      extraRowsToAppend.push(newRow);
+    }
+    multiWorkCount++;
+  }
+
+  if (extraRowsToAppend.length > 0) {
+    console.log(`\n6. 다중 작품 추가 행 ${extraRowsToAppend.length}개 append (${multiWorkCount}개 메시지)...`);
+    await sheets.appendRows(spreadsheetId, `'${tab}'`, extraRowsToAppend);
+    console.log(`   완료`);
+  } else {
+    console.log(`\n6. 다중 작품 추가 행 없음`);
+  }
+
   // 통계
   const stats = {
     category: {} as Record<string, number>,
@@ -393,6 +497,11 @@ async function main() {
   Object.entries(stats.category).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
   console.log('\n═══ 작품 매칭 ═══');
   Object.entries(stats.match).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
+  if (extraRowsToAppend.length > 0) {
+    console.log(`\n═══ 다중 작품 ═══`);
+    console.log(`  다중 작품 메시지: ${multiWorkCount}개`);
+    console.log(`  추가된 행: ${extraRowsToAppend.length}개`);
+  }
 
   // === 로그 탭에 실행 기록 추가 ===
   const writer = new (await import('../src/services/sheets/SheetsWriter')).SheetsWriter(sheets);
