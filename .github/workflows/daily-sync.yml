@@ -17,6 +17,10 @@ on:
         description: '이미지 마이그레이션 스킵 (true/false)'
         required: false
         default: 'false'
+      reset_images:
+        description: '이미지 마이그레이션 progress 초기화 후 처음부터 (true/false)'
+        required: false
+        default: 'false'
       skip_enrich:
         description: 'AI 분류 스킵 (true/false)'
         required: false
@@ -80,7 +84,9 @@ jobs:
       - name: Step 2 - Migrate new images to Supabase
         if: ${{ inputs.skip_images != 'true' }}
         continue-on-error: true   # 이미지 실패해도 분류는 계속
-        run: npx ts-node scripts/migrateImagesToSupabase.ts
+        run: |
+          if [ "${{ inputs.reset_images }}" = "true" ]; then rm -f data/image-migration.json; fi
+          npx ts-node scripts/migrateImagesToSupabase.ts
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
