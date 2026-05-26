@@ -330,15 +330,22 @@ async function main() {
   console.log(`   ${titleIndex.byNumber.size}개 작품 인덱스 구축`);
 
   console.log('\n2. 시트 데이터 읽기...');
-  const rows = await sheets.getRange(spreadsheetId, `'${tab}'!A:L`);
+  // A:Q 까지 읽기 — M(Category) 컬럼으로 이미 분류된 행 판단
+  const rows = await sheets.getRange(spreadsheetId, `'${tab}'!A:Q`);
   const dataRows = rows.slice(1);
   console.log(`   ${dataRows.length}행`);
 
   // permalink별 기존 행 수 카운트 (추가 행 중복 방지)
   const permalinkCount = new Map<string, number>();
+  // permalink별 "이미 분류됨" 플래그 (M 컬럼에 값 있는 행이 하나라도 있으면 true)
+  // → 멀티 PC/멀티 사용자 환경에서 시트가 진실의 원천이 됨
+  const classifiedPermalinks = new Set<string>();
   for (const r of dataRows) {
     const pl = (r[6] ?? '').trim();
-    if (pl) permalinkCount.set(pl, (permalinkCount.get(pl) ?? 0) + 1);
+    if (!pl) continue;
+    permalinkCount.set(pl, (permalinkCount.get(pl) ?? 0) + 1);
+    const category = (r[12] ?? '').trim();  // M 컬럼 = Category
+    if (category) classifiedPermalinks.add(pl);
   }
 
   // permalink → Item 맵
@@ -362,8 +369,16 @@ async function main() {
   const progress = loadProgress();
 
   let items: Item[] = [];
+  let skippedAlreadyClassified = 0;
   for (const [permalink, item] of itemByPermalink) {
+    // 1) 시트 M 컬럼에 이미 값 있으면 스킵 (진실의 원천 = 시트)
+    if (classifiedPermalinks.has(permalink)) {
+      skippedAlreadyClassified++;
+      continue;
+    }
+    // 2) progress.json 캐시에 있어도 스킵 (보조 캐시)
     if (progress[permalink]) continue;
+    // 3) 빈 메시지는 즉시 '기타/없음'으로 마킹
     if (!item.message) {
       progress[permalink] = {
         category: '기타', subCategory: null,
@@ -373,6 +388,9 @@ async function main() {
       continue;
     }
     items.push(item);
+  }
+  if (skippedAlreadyClassified > 0) {
+    console.log(`   시트 M 컬럼 기반 스킵: ${skippedAlreadyClassified}개 (이미 분류됨)`);
   }
 
   if (LIMIT) items = items.slice(0, Number(LIMIT));
