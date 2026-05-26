@@ -26,6 +26,7 @@ const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json'
 const BATCH_SIZE = 100;
 const RPM = 10;                                          // gemini-2.5-flash 무료 티어 실제 한도
 const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;  // 6.5초 간격
+const MAX_BATCHES_PER_RUN = 40;                          // 일일 500 요청 한도 보호 (40배치 × 100 = 4000개/일)
 
 const args = process.argv.slice(2);
 const LIMIT = args.find(a => a.startsWith('--limit='))?.split('=')[1];
@@ -86,7 +87,10 @@ interface RawExtraction {
 
 function normalize(s: string): string {
   return s
-    .replace(/[()[\]{}「」『』〈〉【】<>"']/g, '')
+    .replace(/\[글로벌\s*전용\]/gi, '')   // [글로벌 전용] 전체 제거
+    .replace(/\[.*?\]/g, '')               // 나머지 [...] 전체 제거
+    .replace(/\(.*?\)/g, '')               // (...) 전체 제거
+    .replace(/[{}「」『』〈〉【】<>"']/g, '')
     .replace(/시즌\s*\d+/gi, '')
     .replace(/\s+/g, '')
     .toLowerCase()
@@ -308,8 +312,15 @@ async function main() {
   console.log('\n3. 헤더 보장...');
   await ensureHeaders(spreadsheetId, tab);
 
-  console.log('\n4. Gemini 분류 (배치 50, 분당 15)...');
+  const maxItems = MAX_BATCHES_PER_RUN * BATCH_SIZE;
+  if (items.length > maxItems) {
+    console.log(`   ⚠️ 일일 할당량 보호: ${items.length}개 중 ${maxItems}개만 처리 (나머지는 내일 계속)`);
+    items = items.slice(0, maxItems);
+  }
+
+  console.log(`\n4. Gemini 분류 (배치 ${BATCH_SIZE}, 분당 ${RPM})...`);
   const start = Date.now();
+  let consecutiveFails = 0;
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const t0 = Date.now();
     const batch = items.slice(i, i + BATCH_SIZE);
@@ -327,9 +338,16 @@ async function main() {
         classifiedCount++;
       }
       saveProgress(progress);
+      consecutiveFails = 0;
     } catch (e: any) {
       failedBatches++;
+      consecutiveFails++;
       console.error(`\n  배치 ${i/BATCH_SIZE+1} 실패: ${e.message?.slice(0, 100)}`);
+      // 연속 5회 실패 시 할당량 소진으로 판단, 조기 종료
+      if (consecutiveFails >= 5) {
+        console.error(`\n  ❌ 연속 ${consecutiveFails}회 실패 → 일일 할당량 소진. 오늘 실행 중단. 내일 재개됩니다.`);
+        break;
+      }
     }
     const done = i + batch.length;
     const elapsed = (Date.now() - start) / 1000;
