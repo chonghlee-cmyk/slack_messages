@@ -25,6 +25,10 @@ on:
         description: 'AI 분류 progress 초기화 후 처음부터 (true/false)'
         required: false
         default: 'false'
+      clear_sheet_enrich:
+        description: '시트 M~Q 컬럼도 초기화 (reset_enrich=true일 때 함께 사용)'
+        required: false
+        default: 'false'
       skip_supabase_sync:
         description: 'Supabase 동기화 스킵 (true/false)'
         required: false
@@ -92,7 +96,11 @@ jobs:
       - name: Step 3 - Enrich messages with Gemini
         if: ${{ inputs.skip_enrich != 'true' }}
         continue-on-error: true
-        run: npx ts-node scripts/enrichMessages.ts ${{ inputs.reset_enrich == 'true' && '--reset' || '' }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.reset_enrich }}" = "true" ]; then FLAGS="$FLAGS --reset"; fi
+          if [ "${{ inputs.clear_sheet_enrich }}" = "true" ]; then FLAGS="$FLAGS --clear-sheet"; fi
+          npx ts-node scripts/enrichMessages.ts $FLAGS
         env:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}

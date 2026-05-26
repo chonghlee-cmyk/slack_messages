@@ -5,9 +5,10 @@
  *   - 다중 작품 언급 시 각각 별도 행으로 추가 (Option 2)
  *
  * 사용:
- *   npx ts-node scripts/enrichMessages.ts                  # 전체
- *   npx ts-node scripts/enrichMessages.ts --limit=300      # 테스트
- *   npx ts-node scripts/enrichMessages.ts --reset          # progress 초기화
+ *   npx ts-node scripts/enrichMessages.ts                          # 전체
+ *   npx ts-node scripts/enrichMessages.ts --limit=50               # 테스트
+ *   npx ts-node scripts/enrichMessages.ts --reset                  # progress 초기화
+ *   npx ts-node scripts/enrichMessages.ts --reset --clear-sheet    # progress + 시트 M~Q 초기화
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
@@ -19,14 +20,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json');
-const BATCH_SIZE = 100;
-const RPM = 10;                                          // gemini-2.5-flash 무료 티어 실제 한도
-const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;  // 6.5초 간격
-const MAX_BATCHES_PER_RUN = 40;                          // 일일 500 요청 한도 보호 (40배치 × 100 = 4000개/일)
+const BATCH_SIZE = 10;                                           // 10개씩 처리 후 즉시 시트에 기록
+const RPM = 10;                                                  // gemini-2.5-flash 무료 티어 한도
+const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;          // 6.5초 간격
+const MAX_BATCHES_PER_RUN = 400;                                 // 400배치 × 10 = 4000개/일
 
 const args = process.argv.slice(2);
 const LIMIT = args.find(a => a.startsWith('--limit='))?.split('=')[1];
 const RESET = args.includes('--reset');
+const CLEAR_SHEET = args.includes('--clear-sheet');
 
 const PROMPT_HEADER = `당신은 한국어 글로벌 콘텐츠 운영 팀의 Slack 메시지를 분석합니다.
 각 메시지마다 다음을 추출하세요:
@@ -61,9 +63,9 @@ C) 작품 목록 (메시지에서 언급된 모든 작품):
 `;
 
 interface Item {
-  rowIdx: number;    // 시트 행 번호 (2부터), M-Q 업데이트용
-  permalink: string; // G컬럼, progress 키
-  rowData: string[]; // 원본 A-L 데이터 (12컬럼), 추가 행 생성용
+  rowIdx: number;
+  permalink: string;
+  rowData: string[];
   isReply: boolean;
   sender: string;
   message: string;
@@ -82,8 +84,8 @@ interface Enrichment {
   titleNumber: string | null;
   titleName: string | null;
   titleMatch: '정확' | '이름매칭' | '번호매칭' | '유사' | '없음';
-  additionalWorks?: AdditionalWork[];  // 2번째 작품 이후
-  rowIdx: number;                      // 시트 행 번호 (저장용)
+  additionalWorks?: AdditionalWork[];
+  rowIdx: number;
 }
 
 interface RawExtraction {
@@ -96,9 +98,9 @@ interface RawExtraction {
 
 function normalize(s: string): string {
   return s
-    .replace(/\[글로벌\s*전용\]/gi, '')   // [글로벌 전용] 전체 제거
-    .replace(/\[.*?\]/g, '')               // 나머지 [...] 전체 제거
-    .replace(/\(.*?\)/g, '')               // (...) 전체 제거
+    .replace(/\[글로벌\s*전용\]/gi, '')
+    .replace(/\[.*?\]/g, '')
+    .replace(/\(.*?\)/g, '')
     .replace(/[{}「」『』〈〉【】<>"']/g, '')
     .replace(/시즌\s*\d+/gi, '')
     .replace(/\s+/g, '')
@@ -123,7 +125,7 @@ function levenshtein(a: string, b: string): number {
 }
 
 function buildTitleIndex(rows: string[][]) {
-  const byNumber = new Map<string, string>(); // num → name
+  const byNumber = new Map<string, string>();
   const byNormName = new Map<string, { num: string; name: string }>();
   for (const r of rows.slice(1)) {
     const num = (r[0] ?? '').trim();
@@ -143,43 +145,30 @@ function matchWork(
   const numRaw = work.tn?.replace(/[^0-9]/g, '') ?? '';
   const nameRaw = work.name ?? '';
 
-  // 1) 둘 다 있고 DB에 둘 다 일치
   if (numRaw && nameRaw) {
     const dbName = index.byNumber.get(numRaw);
     const nmNorm = normalize(nameRaw);
-    if (dbName && normalize(dbName) === nmNorm) {
-      return { num: numRaw, name: dbName, conf: '정확' };
-    }
-    // 번호는 있는데 이름이 다르면 → 이름으로 다시 검색
+    if (dbName && normalize(dbName) === nmNorm) return { num: numRaw, name: dbName, conf: '정확' };
     const byName = index.byNormName.get(nmNorm);
-    if (byName) {
-      return { num: byName.num, name: byName.name, conf: '이름매칭' };
-    }
+    if (byName) return { num: byName.num, name: byName.name, conf: '이름매칭' };
   }
-  // 2) 이름만
   if (nameRaw) {
     const nmNorm = normalize(nameRaw);
     const byName = index.byNormName.get(nmNorm);
     if (byName) return { num: byName.num, name: byName.name, conf: '이름매칭' };
-    // 퍼지: 가장 가까운 이름 (distance <= 2 또는 길이의 20% 이하)
     let best: { num: string; name: string; dist: number } | null = null;
     for (const [norm, entry] of index.byNormName) {
       const d = levenshtein(nmNorm, norm);
       const threshold = Math.max(2, Math.floor(norm.length * 0.2));
-      if (d <= threshold && (!best || d < best.dist)) {
-        best = { num: entry.num, name: entry.name, dist: d };
-      }
+      if (d <= threshold && (!best || d < best.dist)) best = { num: entry.num, name: entry.name, dist: d };
     }
     if (best) return { num: best.num, name: best.name, conf: '유사' };
   }
-  // 3) 번호만 → DB에 있는지
-  if (numRaw && index.byNumber.has(numRaw)) {
-    return { num: numRaw, name: index.byNumber.get(numRaw)!, conf: '번호매칭' };
-  }
+  if (numRaw && index.byNumber.has(numRaw)) return { num: numRaw, name: index.byNumber.get(numRaw)!, conf: '번호매칭' };
   return { num: '', name: '', conf: '없음' };
 }
 
-// === 메인 ===
+// === Progress ===
 
 function loadProgress(): Record<string, Enrichment> {
   if (RESET && fs.existsSync(PROGRESS_FILE)) fs.unlinkSync(PROGRESS_FILE);
@@ -192,6 +181,8 @@ function saveProgress(p: Record<string, Enrichment>) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p));
 }
+
+// === Gemini ===
 
 async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Map<string, RawExtraction>> {
   const lines = batch.map((it, i) => {
@@ -214,20 +205,13 @@ async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Ma
       for (const p of parsed) {
         const it = batch[(p.i ?? 0) - 1];
         if (!it) continue;
-
-        // works 배열 파싱 (신규 형식 우선, 구형 tn/name 폴백)
         let works: Array<{ tn: string | null; name: string | null }>;
         if (Array.isArray(p.works) && p.works.length > 0) {
           works = p.works.map((w: any) => ({ tn: w.tn ?? null, name: w.name ?? null }));
         } else {
           works = [{ tn: p.tn ?? null, name: p.name ?? null }];
         }
-
-        out.set(it.permalink, {
-          category: p.c ?? null,
-          subCategory: p.sc ?? null,
-          works,
-        });
+        out.set(it.permalink, { category: p.c ?? null, subCategory: p.sc ?? null, works });
       }
       return out;
     } catch (e: any) {
@@ -235,9 +219,9 @@ async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Ma
         (e?.message ?? '').includes('quota') || (e?.message ?? '').includes('RESOURCE_EXHAUSTED');
       if (attempt < maxRetries) {
         const waitMs = isQuota
-          ? (attempt + 1) * 30_000   // 할당량 초과: 30초씩 증가
-          : Math.min(1000 * 2 ** attempt, 16_000);  // 일반 오류: 지수 백오프
-        console.error(`\n  Gemini 오류 (시도 ${attempt + 1}/${maxRetries + 1}): ${e.message?.slice(0, 80)} → ${waitMs / 1000}초 대기`);
+          ? (attempt + 1) * 30_000
+          : Math.min(1000 * 2 ** attempt, 16_000);
+        console.error(`\n  Gemini 오류 (시도 ${attempt+1}/${maxRetries+1}): ${e.message?.slice(0,80)} → ${waitMs/1000}초 대기`);
         await new Promise(r => setTimeout(r, waitMs));
         continue;
       }
@@ -249,22 +233,15 @@ async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Ma
 
 function loadGoogleCredentials() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
-  if (b64) {
-    return JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
-  }
+  if (b64) return JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
   const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH;
-  if (keyPath) {
-    return JSON.parse(fs.readFileSync(require('path').resolve(keyPath), 'utf-8'));
-  }
-  throw new Error('No Google credentials (KEY_BASE64 or KEY_PATH)');
+  if (keyPath) return JSON.parse(fs.readFileSync(require('path').resolve(keyPath), 'utf-8'));
+  throw new Error('No Google credentials');
 }
 
 async function ensureHeaders(spreadsheetId: string, tab: string) {
   const credentials = loadGoogleCredentials();
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
+  const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
   const api = google.sheets({ version: 'v4', auth });
   await api.spreadsheets.values.update({
     spreadsheetId,
@@ -273,6 +250,8 @@ async function ensureHeaders(spreadsheetId: string, tab: string) {
     requestBody: { values: [['Category','Sub Category','작품번호','작품명','작품매칭']] },
   });
 }
+
+// === 메인 ===
 
 async function main() {
   const runStart = new Date();
@@ -291,6 +270,13 @@ async function main() {
   const tab = process.env.GOOGLE_SHEETS_OUTPUT_TAB ?? 'Slack';
   const logTab = process.env.GOOGLE_SHEETS_LOG_TAB ?? 'Slack 로그';
 
+  // === 0. 시트 M~Q 초기화 (--clear-sheet 옵션) ===
+  if (CLEAR_SHEET) {
+    console.log('0. 시트 M~Q 컬럼 초기화...');
+    await sheets.clearRange(spreadsheetId, `'${tab}'!M2:Q`);
+    console.log('   완료');
+  }
+
   console.log('1. 작품 DB 로드...');
   const dbRows = await sheets.getRange(spreadsheetId, `'작품정보'!A:B`);
   const titleIndex = buildTitleIndex(dbRows);
@@ -301,43 +287,37 @@ async function main() {
   const dataRows = rows.slice(1);
   console.log(`   ${dataRows.length}행`);
 
-  // permalink별 기존 행 수 카운트 (중복 행 추가 방지용)
+  // permalink별 기존 행 수 카운트 (추가 행 중복 방지)
   const permalinkCount = new Map<string, number>();
   for (const r of dataRows) {
     const pl = (r[6] ?? '').trim();
     if (pl) permalinkCount.set(pl, (permalinkCount.get(pl) ?? 0) + 1);
   }
 
-  // permalink → Item 맵 (추가 행 생성 시 원본 데이터 조회용)
-  // 동일 permalink의 첫 번째 행(rowIdx 최솟값)만 사용
+  // permalink → Item 맵
   const itemByPermalink = new Map<string, Item>();
   for (let i = 0; i < dataRows.length; i++) {
     const r = dataRows[i];
     const rowIdx = i + 2;
     const permalink = (r[6] ?? '').trim();
-    if (!permalink) continue;
-    if (!itemByPermalink.has(permalink)) {
-      // 최초 등장 행만 저장 (원본)
-      itemByPermalink.set(permalink, {
-        rowIdx,
-        permalink,
-        rowData: r.slice(0, 12),
-        isReply: r[0] === 'TRUE',
-        sender: r[2] ?? '',
-        message: (r[5] ?? '').trim(),
-        parentText: r[7] ?? '',
-      });
-    }
+    if (!permalink || itemByPermalink.has(permalink)) continue;
+    itemByPermalink.set(permalink, {
+      rowIdx,
+      permalink,
+      rowData: r.slice(0, 12),
+      isReply: r[0] === 'TRUE',
+      sender: r[2] ?? '',
+      message: (r[5] ?? '').trim(),
+      parentText: r[7] ?? '',
+    });
   }
 
   const progress = loadProgress();
 
-  // 아직 처리 안 된 고유 permalink 목록으로 items 구성
   let items: Item[] = [];
   for (const [permalink, item] of itemByPermalink) {
-    if (progress[permalink]) continue;  // 이미 처리됨
+    if (progress[permalink]) continue;
     if (!item.message) {
-      // 메시지 없는 행은 기타로 즉시 처리
       progress[permalink] = {
         category: '기타', subCategory: null,
         titleNumber: null, titleName: null, titleMatch: '없음',
@@ -356,34 +336,39 @@ async function main() {
 
   const maxItems = MAX_BATCHES_PER_RUN * BATCH_SIZE;
   if (items.length > maxItems) {
-    console.log(`   ⚠️ 일일 할당량 보호: ${items.length}개 중 ${maxItems}개만 처리 (나머지는 내일 계속)`);
+    console.log(`   ⚠️ 일일 할당량 보호: ${items.length}개 중 ${maxItems}개만 처리`);
     items = items.slice(0, maxItems);
   }
 
-  console.log(`\n4. Gemini 분류 (배치 ${BATCH_SIZE}, 분당 ${RPM})...`);
+  console.log(`\n4. Gemini 분류 + 즉시 기록 (${BATCH_SIZE}개씩, 분당 ${RPM}회)...`);
   const start = Date.now();
   let consecutiveFails = 0;
-  // 이번 실행에서 새로 처리된 항목 (추가 행 append용)
-  const newlyProcessed = new Map<string, Enrichment>();
+  let batchNum = 0;
+  let extraRowsTotal = 0;
 
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const t0 = Date.now();
     const batch = items.slice(i, i + BATCH_SIZE);
+    batchNum++;
+
     try {
       const raws = await callGemini(model, batch);
+
+      // 이번 배치 시트 업데이트 준비
+      const sheetUpdates: { range: string; values: string[][] }[] = [];
+      const extraRows: string[][] = [];
+
       for (const [permalink, raw] of raws) {
-        // 첫 번째 작품 매칭
+        const item = itemByPermalink.get(permalink);
+        if (!item) continue;
+
         const firstWork = raw.works[0] ?? { tn: null, name: null };
         const { num, name, conf } = matchWork(firstWork, titleIndex);
 
-        // 추가 작품 매칭 (2번째 이후)
         const additionalWorks: AdditionalWork[] = raw.works.slice(1).map(w => {
           const { num: n, name: nm, conf: c } = matchWork(w, titleIndex);
           return { titleNumber: n || null, titleName: nm || null, titleMatch: c };
         });
-
-        const item = itemByPermalink.get(permalink);
-        if (!item) continue;
 
         const enrichment: Enrichment = {
           category: raw.category,
@@ -396,114 +381,85 @@ async function main() {
         };
 
         progress[permalink] = enrichment;
-        newlyProcessed.set(permalink, enrichment);
         classifiedCount++;
+
+        // M~Q 업데이트
+        sheetUpdates.push({
+          range: `'${tab}'!M${item.rowIdx}:Q${item.rowIdx}`,
+          values: [[
+            enrichment.category ?? '',
+            enrichment.subCategory ?? '',
+            enrichment.titleNumber ?? '',
+            enrichment.titleName ?? '',
+            enrichment.titleMatch,
+          ]],
+        });
+
+        // 다중 작품 추가 행
+        if (additionalWorks.length > 0) {
+          const existingCount = permalinkCount.get(permalink) ?? 1;
+          if (existingCount === 1) {
+            for (const aw of additionalWorks) {
+              extraRows.push([
+                ...Array.from({ length: 12 }, (_, j) => item.rowData[j] ?? ''),
+                enrichment.category ?? '',
+                enrichment.subCategory ?? '',
+                aw.titleNumber ?? '',
+                aw.titleName ?? '',
+                aw.titleMatch,
+              ]);
+            }
+            // 다음 실행에서 중복 방지
+            permalinkCount.set(permalink, existingCount + additionalWorks.length);
+          }
+        }
       }
+
+      // 즉시 시트에 쓰기
+      if (sheetUpdates.length > 0) await sheets.batchUpdate(spreadsheetId, sheetUpdates);
+      if (extraRows.length > 0) {
+        await sheets.appendRows(spreadsheetId, `'${tab}'`, extraRows);
+        extraRowsTotal += extraRows.length;
+      }
+
       saveProgress(progress);
       consecutiveFails = 0;
+
     } catch (e: any) {
       failedBatches++;
       consecutiveFails++;
-      console.error(`\n  배치 ${i/BATCH_SIZE+1} 실패: ${e.message?.slice(0, 100)}`);
-      // 연속 5회 실패 시 할당량 소진으로 판단, 조기 종료
+      console.error(`\n  배치 ${batchNum} 실패: ${e.message?.slice(0, 100)}`);
       if (consecutiveFails >= 5) {
-        console.error(`\n  ❌ 연속 ${consecutiveFails}회 실패 → 일일 할당량 소진. 오늘 실행 중단. 내일 재개됩니다.`);
+        console.error(`\n  ❌ 연속 5회 실패 → 할당량 소진. 오늘 중단, 내일 재개.`);
         break;
       }
     }
-    const done = i + batch.length;
+
+    const done = Math.min(i + BATCH_SIZE, items.length);
     const elapsed = (Date.now() - start) / 1000;
     const rate = done / elapsed;
-    const eta = (items.length - done) / rate / 60;
-    process.stdout.write(`\r   진행: ${done}/${items.length} | ETA: ${eta.toFixed(1)}분  `);
+    const eta = items.length > done ? ((items.length - done) / rate / 60).toFixed(1) : '0.0';
+    process.stdout.write(`\r   [${batchNum}배치] ${done}/${items.length} 완료 | ETA: ${eta}분  `);
+
     const used = Date.now() - t0;
     if (used < REQ_INTERVAL_MS && i + BATCH_SIZE < items.length) {
       await new Promise(r => setTimeout(r, REQ_INTERVAL_MS - used));
     }
   }
 
-  // === 5. 시트 업데이트: M~Q 컬럼 (기존 행) ===
-  console.log('\n\n5. 시트 업데이트 (M~Q 컬럼, batch)...');
-  const updates: { range: string; values: string[][] }[] = [];
-  for (const [_key, e] of Object.entries(progress)) {
-    if (!e.rowIdx) continue;  // 구버전 progress(rowIdx 없음) 호환성
-    updates.push({
-      range: `'${tab}'!M${e.rowIdx}:Q${e.rowIdx}`,
-      values: [[
-        e.category ?? '',
-        e.subCategory ?? '',
-        e.titleNumber ?? '',
-        e.titleName ?? '',
-        e.titleMatch,
-      ]],
-    });
-  }
-  const CHUNK = 500;
-  for (let i = 0; i < updates.length; i += CHUNK) {
-    await sheets.batchUpdate(spreadsheetId, updates.slice(i, i + CHUNK));
-    console.log(`   batch ${Math.floor(i/CHUNK)+1} 완료`);
-  }
-
-  // === 6. 추가 작품 행 append (다중 작품 언급 시) ===
-  const extraRowsToAppend: string[][] = [];
-  let multiWorkCount = 0;
-
-  for (const [permalink, e] of newlyProcessed) {
-    if (!e.additionalWorks || e.additionalWorks.length === 0) continue;
-
-    // 이미 추가 행이 존재하면 skip (중복 방지 — progress 유실 시 대비)
-    const existingCount = permalinkCount.get(permalink) ?? 1;
-    if (existingCount > 1) {
-      console.log(`   skip duplicate extra rows for ${permalink} (already ${existingCount} rows)`);
-      continue;
-    }
-
-    const origItem = itemByPermalink.get(permalink);
-    if (!origItem) continue;
-
-    for (const aw of e.additionalWorks) {
-      // A-L: 원본 행 데이터 복사, M-Q: 추가 작품 분류
-      const newRow: string[] = [
-        ...Array.from({ length: 12 }, (_, j) => origItem.rowData[j] ?? ''),
-        e.category ?? '',
-        e.subCategory ?? '',
-        aw.titleNumber ?? '',
-        aw.titleName ?? '',
-        aw.titleMatch,
-      ];
-      extraRowsToAppend.push(newRow);
-    }
-    multiWorkCount++;
-  }
-
-  if (extraRowsToAppend.length > 0) {
-    console.log(`\n6. 다중 작품 추가 행 ${extraRowsToAppend.length}개 append (${multiWorkCount}개 메시지)...`);
-    await sheets.appendRows(spreadsheetId, `'${tab}'`, extraRowsToAppend);
-    console.log(`   완료`);
-  } else {
-    console.log(`\n6. 다중 작품 추가 행 없음`);
-  }
-
   // 통계
-  const stats = {
-    category: {} as Record<string, number>,
-    match: {} as Record<string, number>,
-  };
+  const stats = { category: {} as Record<string, number>, match: {} as Record<string, number> };
   for (const e of Object.values(progress)) {
     stats.category[e.category ?? '없음'] = (stats.category[e.category ?? '없음'] ?? 0) + 1;
     stats.match[e.titleMatch] = (stats.match[e.titleMatch] ?? 0) + 1;
   }
-  console.log('\n═══ Category 분포 ═══');
+  console.log('\n\n═══ Category 분포 ═══');
   Object.entries(stats.category).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
   console.log('\n═══ 작품 매칭 ═══');
   Object.entries(stats.match).forEach(([k,v]) => console.log(`  ${k}: ${v}`));
-  if (extraRowsToAppend.length > 0) {
-    console.log(`\n═══ 다중 작품 ═══`);
-    console.log(`  다중 작품 메시지: ${multiWorkCount}개`);
-    console.log(`  추가된 행: ${extraRowsToAppend.length}개`);
-  }
+  if (extraRowsTotal > 0) console.log(`\n═══ 다중 작품 추가 행: ${extraRowsTotal}개 ═══`);
 
-  // === 로그 탭에 실행 기록 추가 ===
+  // 로그 탭 기록
   const writer = new (await import('../src/services/sheets/SheetsWriter')).SheetsWriter(sheets);
   await writer.appendEnrichLogRow(spreadsheetId, logTab, {
     startedAt: runStart,
