@@ -110,6 +110,7 @@ jobs:
         env:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
           GOOGLE_AI_API_KEY_2: ${{ secrets.GOOGLE_AI_API_KEY_2 }}
+          GOOGLE_AI_API_KEY_3: ${{ secrets.GOOGLE_AI_API_KEY_3 }}
           GOOGLE_SERVICE_ACCOUNT_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 }}
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
           GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
