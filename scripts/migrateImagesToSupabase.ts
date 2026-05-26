@@ -85,7 +85,11 @@ async function main() {
     if (!urlsStr) continue;
     try {
       const list = JSON.parse(urlsStr);
-      if (Array.isArray(list)) list.forEach((u: string) => allUrls.add(u));
+      if (Array.isArray(list)) list.forEach((u: string) => {
+        // 이미 Supabase URL로 교체된 것은 건너뜀 (재업로드 방지)
+        if (u.includes(supabaseUrl) || u.includes('supabase')) return;
+        allUrls.add(u);
+      });
     } catch {}
   }
   const urlList = [...allUrls];
