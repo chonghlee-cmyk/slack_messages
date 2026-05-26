@@ -452,13 +452,15 @@ async function main() {
 
     } catch (e: any) {
       failedBatches++;
-      const isQuota = e?.status === 429 || (e?.message ?? '').includes('429') ||
-        (e?.message ?? '').includes('quota') || (e?.message ?? '').includes('RESOURCE_EXHAUSTED');
+      // 진짜 quota 소진 = 명확한 429 신호만 (네트워크 오류와 구분)
+      const isDefinitelyQuota =
+        e?.status === 429 ||
+        (e?.message ?? '').includes('RESOURCE_EXHAUSTED') ||
+        ((e?.message ?? '').includes('429') && (e?.message ?? '').includes('quota'));
 
-      if (isQuota) {
+      if (isDefinitelyQuota) {
         keyExhausted[active.keyIdx] = true;
-        console.error(`\n  ⚠️ 키 ${active.keyIdx + 1} 할당량 소진 → 다음 키로 전환`);
-        // 다른 키 있는지 확인
+        console.error(`\n  ⚠️ 키 ${active.keyIdx + 1} 일일 할당량 소진 → 다음 키로 전환`);
         const next = getActiveModel();
         if (!next) {
           console.error('  ❌ 모든 API 키 할당량 소진. 오늘 중단, 내일 재개.');
@@ -469,10 +471,11 @@ async function main() {
         batchNum--;
         consecutiveFails = 0;
       } else {
+        // 네트워크 오류 등 일시적 오류
         consecutiveFails++;
-        console.error(`\n  배치 ${batchNum} 실패: ${e.message?.slice(0, 100)}`);
+        console.error(`\n  배치 ${batchNum} 실패 (일시적 오류): ${e.message?.slice(0, 100)}`);
         if (consecutiveFails >= 5) {
-          console.error(`\n  ❌ 연속 5회 실패. 오늘 중단, 내일 재개.`);
+          console.error(`\n  ❌ 연속 5회 실패. 네트워크 문제일 수 있음. 오늘 중단, 내일 재개.`);
           break;
         }
       }
