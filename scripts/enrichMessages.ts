@@ -20,12 +20,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const PROGRESS_FILE = path.resolve(process.cwd(), 'data', 'enrich-progress.json');
-const BATCH_SIZE = 50;                                           // 50개씩 처리 후 즉시 시트에 기록 (API 호출 효율 + 진행 가시성 균형)
+const BATCH_SIZE = 50;                                           // 50개씩 처리 후 즉시 시트에 기록
 const RPM = 6;                                                   // 보수적: 무료 한도 10의 60%만 사용
 const REQ_INTERVAL_MS = Math.ceil(60_000 / RPM) + 500;          // ~10.5초 간격
 const MAX_BATCHES_PER_RUN = 80;                                  // 80배치 × 50 = 4000개/일
 const KEY_EXHAUSTED_THRESHOLD = 3;                              // 연속 N번 quota 실패 시 키 소진 판단
-const RPM_COOLDOWN_MS = 5 * 60 * 1000;                          // 일시 한도 의심 시 5분 대기
+const RPM_COOLDOWN_MS = 60 * 1000;                              // 일시 한도 의심 시 1분 대기 (sliding window 60초)
+const GEMINI_MAX_RETRIES = 2;                                   // callGemini 내부 재시도 (총 3번 시도: 10s, 20s, 40s)
 
 const args = process.argv.slice(2);
 const LIMIT = args.find(a => a.startsWith('--limit='))?.split('=')[1];
@@ -128,46 +129,72 @@ function levenshtein(a: string, b: string): number {
 
 function buildTitleIndex(rows: string[][]) {
   const byNumber = new Map<string, string>();
-  const byNormName = new Map<string, { num: string; name: string }>();
+  // 같은 정규화 이름에 여러 작품번호 (언어권 분리: "한지붕 아래", "한지붕 아래[영어 전용]" 등)
+  const byNormName = new Map<string, Array<{ num: string; name: string }>>();
   for (const r of rows.slice(1)) {
     const num = (r[0] ?? '').trim();
     const name = (r[1] ?? '').trim();
     if (num && name) {
       byNumber.set(num, name);
-      byNormName.set(normalize(name), { num, name });
+      const key = normalize(name);
+      if (!byNormName.has(key)) byNormName.set(key, []);
+      byNormName.get(key)!.push({ num, name });
     }
   }
   return { byNumber, byNormName };
 }
 
+// 매칭 결과: 같은 이름의 여러 언어권 작품 모두 반환
 function matchWork(
   work: { tn: string | null; name: string | null },
   index: ReturnType<typeof buildTitleIndex>
-): { num: string; name: string; conf: AdditionalWork['titleMatch'] } {
+): Array<{ num: string; name: string; conf: AdditionalWork['titleMatch'] }> {
   const numRaw = work.tn?.replace(/[^0-9]/g, '') ?? '';
   const nameRaw = work.name ?? '';
 
+  // 1) 번호 + 이름 → 정확 매칭 우선
   if (numRaw && nameRaw) {
     const dbName = index.byNumber.get(numRaw);
     const nmNorm = normalize(nameRaw);
-    if (dbName && normalize(dbName) === nmNorm) return { num: numRaw, name: dbName, conf: '정확' };
+    if (dbName && normalize(dbName) === nmNorm) {
+      // 정확 매칭된 작품 + 같은 정규화 이름의 다른 언어권 작품들
+      const allMatches = index.byNormName.get(nmNorm) ?? [];
+      const primary = { num: numRaw, name: dbName, conf: '정확' as const };
+      const others = allMatches
+        .filter(e => e.num !== numRaw)
+        .map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
+      return [primary, ...others];
+    }
+    // 번호는 있는데 이름이 다르면 → 이름으로 검색
     const byName = index.byNormName.get(nmNorm);
-    if (byName) return { num: byName.num, name: byName.name, conf: '이름매칭' };
+    if (byName && byName.length > 0) {
+      return byName.map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
+    }
   }
+  // 2) 이름만
   if (nameRaw) {
     const nmNorm = normalize(nameRaw);
     const byName = index.byNormName.get(nmNorm);
-    if (byName) return { num: byName.num, name: byName.name, conf: '이름매칭' };
-    let best: { num: string; name: string; dist: number } | null = null;
-    for (const [norm, entry] of index.byNormName) {
+    if (byName && byName.length > 0) {
+      return byName.map(e => ({ num: e.num, name: e.name, conf: '이름매칭' as const }));
+    }
+    // 퍼지: 가장 가까운 정규화 이름
+    let best: { norm: string; dist: number } | null = null;
+    for (const norm of index.byNormName.keys()) {
       const d = levenshtein(nmNorm, norm);
       const threshold = Math.max(2, Math.floor(norm.length * 0.2));
-      if (d <= threshold && (!best || d < best.dist)) best = { num: entry.num, name: entry.name, dist: d };
+      if (d <= threshold && (!best || d < best.dist)) best = { norm, dist: d };
     }
-    if (best) return { num: best.num, name: best.name, conf: '유사' };
+    if (best) {
+      const entries = index.byNormName.get(best.norm) ?? [];
+      return entries.map(e => ({ num: e.num, name: e.name, conf: '유사' as const }));
+    }
   }
-  if (numRaw && index.byNumber.has(numRaw)) return { num: numRaw, name: index.byNumber.get(numRaw)!, conf: '번호매칭' };
-  return { num: '', name: '', conf: '없음' };
+  // 3) 번호만
+  if (numRaw && index.byNumber.has(numRaw)) {
+    return [{ num: numRaw, name: index.byNumber.get(numRaw)!, conf: '번호매칭' as const }];
+  }
+  return [{ num: '', name: '', conf: '없음' as const }];
 }
 
 // === Progress ===
@@ -186,7 +213,7 @@ function saveProgress(p: Record<string, Enrichment>) {
 
 // === Gemini ===
 
-async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Map<string, RawExtraction>> {
+async function callGemini(model: any, batch: Item[], maxRetries = GEMINI_MAX_RETRIES): Promise<Map<string, RawExtraction>> {
   const lines = batch.map((it, i) => {
     const role = it.isReply ? '답글' : '메시지';
     const parent = it.parentText ? ` [부모: ${it.parentText.slice(0, 100)}]` : '';
@@ -217,12 +244,9 @@ async function callGemini(model: any, batch: Item[], maxRetries = 4): Promise<Ma
       }
       return out;
     } catch (e: any) {
-      const isQuota = e?.status === 429 || (e?.message ?? '').includes('429') ||
-        (e?.message ?? '').includes('quota') || (e?.message ?? '').includes('RESOURCE_EXHAUSTED');
       if (attempt < maxRetries) {
-        const waitMs = isQuota
-          ? (attempt + 1) * 30_000
-          : Math.min(1000 * 2 ** attempt, 16_000);
+        // 짧은 백오프: 10s, 20s, 40s (총 최대 70초)
+        const waitMs = 10_000 * Math.pow(2, attempt);
         console.error(`\n  Gemini 오류 (시도 ${attempt+1}/${maxRetries+1}): ${e.message?.slice(0,80)} → ${waitMs/1000}초 대기`);
         await new Promise(r => setTimeout(r, waitMs));
         continue;
@@ -367,6 +391,7 @@ async function main() {
   let consecutiveFails = 0;
   let batchNum = 0;
   let extraRowsTotal = 0;
+  const skippedBatches: Item[][] = [];  // 네트워크 오류로 스킵된 배치 (나중에 재시도)
 
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const t0 = Date.now();
@@ -392,19 +417,32 @@ async function main() {
         if (!item) continue;
 
         const firstWork = raw.works[0] ?? { tn: null, name: null };
-        const { num, name, conf } = matchWork(firstWork, titleIndex);
+        const firstMatches = matchWork(firstWork, titleIndex);
+        const primary = firstMatches[0];
 
-        const additionalWorks: AdditionalWork[] = raw.works.slice(1).map(w => {
-          const { num: n, name: nm, conf: c } = matchWork(w, titleIndex);
-          return { titleNumber: n || null, titleName: nm || null, titleMatch: c };
-        });
+        // primary의 다른 언어권 + raw.works[1+] 모두 추가 행 후보
+        const allAdditionalCandidates: AdditionalWork[] = [
+          ...firstMatches.slice(1).map(m => ({ titleNumber: m.num, titleName: m.name, titleMatch: m.conf })),
+          ...raw.works.slice(1).flatMap(w => matchWork(w, titleIndex)).map(m => ({ titleNumber: m.num, titleName: m.name, titleMatch: m.conf })),
+        ];
+
+        // primary와 중복되는 작품번호 제거
+        const seenNums = new Set<string>();
+        if (primary.num) seenNums.add(primary.num);
+        const additionalWorks: AdditionalWork[] = [];
+        for (const aw of allAdditionalCandidates) {
+          if (!aw.titleNumber) continue;
+          if (seenNums.has(aw.titleNumber)) continue;
+          seenNums.add(aw.titleNumber);
+          additionalWorks.push(aw);
+        }
 
         const enrichment: Enrichment = {
           category: raw.category,
           subCategory: raw.subCategory,
-          titleNumber: num || null,
-          titleName: name || null,
-          titleMatch: conf,
+          titleNumber: primary.num || null,
+          titleName: primary.name || null,
+          titleMatch: primary.conf,
           additionalWorks: additionalWorks.length > 0 ? additionalWorks : undefined,
           rowIdx: item.rowIdx,
         };
@@ -481,17 +519,18 @@ async function main() {
           batchNum--;
           consecutiveFails = 0;
         } else {
-          // 1~2번째 실패: RPM(분당 한도) 의심 → 5분 대기 후 같은 키 재시도
-          console.error(`\n  ⏸️ 키 ${active.keyIdx + 1} 일시 한도 (${failCount}/${KEY_EXHAUSTED_THRESHOLD}) → 5분 대기 후 같은 키 재시도`);
+          // 1~2번째 실패: RPM(분당 한도) 의심 → 1분 대기 후 같은 키 재시도
+          console.error(`\n  ⏸️ 키 ${active.keyIdx + 1} 일시 한도 (${failCount}/${KEY_EXHAUSTED_THRESHOLD}) → 1분 대기 후 같은 키 재시도`);
           await new Promise(r => setTimeout(r, RPM_COOLDOWN_MS));
           i -= BATCH_SIZE;
           batchNum--;
           consecutiveFails = 0;
         }
       } else {
-        // 네트워크 오류 등 진짜 일시적 오류
+        // 네트워크 오류 등 진짜 일시적 오류 → 스킵된 배치 목록에 저장 (나중에 재시도)
         consecutiveFails++;
-        console.error(`\n  배치 ${batchNum} 실패 (네트워크?): ${e.message?.slice(0, 100)}`);
+        skippedBatches.push(batch);
+        console.error(`\n  배치 ${batchNum} 실패 (네트워크?): ${e.message?.slice(0, 100)} → 스킵 큐에 저장 (나중에 재시도)`);
         if (consecutiveFails >= 5) {
           console.error(`\n  ❌ 연속 5회 실패. 네트워크 문제일 수 있음. 오늘 중단, 내일 재개.`);
           break;
@@ -509,6 +548,91 @@ async function main() {
     if (used < REQ_INTERVAL_MS && i + BATCH_SIZE < items.length) {
       await new Promise(r => setTimeout(r, REQ_INTERVAL_MS - used));
     }
+  }
+
+  // 스킵된 배치 재시도 (한 번만)
+  if (skippedBatches.length > 0) {
+    console.log(`\n\n5. 스킵된 ${skippedBatches.length}개 배치 재시도...`);
+    let retriedSuccess = 0;
+    let retriedFail = 0;
+    for (let bi = 0; bi < skippedBatches.length; bi++) {
+      const batch = skippedBatches[bi];
+      const active = getActiveModel();
+      if (!active) {
+        console.error('  ❌ 모든 키 소진. 재시도 불가.');
+        break;
+      }
+      try {
+        const raws = await callGemini(active.model, batch);
+        const sheetUpdates: { range: string; values: string[][] }[] = [];
+        const extraRows: string[][] = [];
+        for (const [permalink, raw] of raws) {
+          const item = itemByPermalink.get(permalink);
+          if (!item) continue;
+          const firstWork = raw.works[0] ?? { tn: null, name: null };
+          const firstMatches = matchWork(firstWork, titleIndex);
+          const primary = firstMatches[0];
+          const allAdditionalCandidates: AdditionalWork[] = [
+            ...firstMatches.slice(1).map(m => ({ titleNumber: m.num, titleName: m.name, titleMatch: m.conf })),
+            ...raw.works.slice(1).flatMap(w => matchWork(w, titleIndex)).map(m => ({ titleNumber: m.num, titleName: m.name, titleMatch: m.conf })),
+          ];
+          const seenNums = new Set<string>();
+          if (primary.num) seenNums.add(primary.num);
+          const additionalWorks: AdditionalWork[] = [];
+          for (const aw of allAdditionalCandidates) {
+            if (!aw.titleNumber || seenNums.has(aw.titleNumber)) continue;
+            seenNums.add(aw.titleNumber);
+            additionalWorks.push(aw);
+          }
+          const enrichment: Enrichment = {
+            category: raw.category, subCategory: raw.subCategory,
+            titleNumber: primary.num || null, titleName: primary.name || null, titleMatch: primary.conf,
+            additionalWorks: additionalWorks.length > 0 ? additionalWorks : undefined,
+            rowIdx: item.rowIdx,
+          };
+          progress[permalink] = enrichment;
+          classifiedCount++;
+          retriedSuccess++;
+          sheetUpdates.push({
+            range: `'${tab}'!M${item.rowIdx}:Q${item.rowIdx}`,
+            values: [[
+              enrichment.category ?? '', enrichment.subCategory ?? '',
+              enrichment.titleNumber ?? '', enrichment.titleName ?? '',
+              enrichment.titleMatch,
+            ]],
+          });
+          // 추가 작품 행
+          if (additionalWorks.length > 0) {
+            const existingCount = permalinkCount.get(permalink) ?? 1;
+            if (existingCount === 1) {
+              for (const aw of additionalWorks) {
+                extraRows.push([
+                  ...Array.from({ length: 12 }, (_, j) => item.rowData[j] ?? ''),
+                  enrichment.category ?? '',
+                  enrichment.subCategory ?? '',
+                  aw.titleNumber ?? '',
+                  aw.titleName ?? '',
+                  aw.titleMatch,
+                ]);
+              }
+              permalinkCount.set(permalink, existingCount + additionalWorks.length);
+            }
+          }
+        }
+        if (sheetUpdates.length > 0) await sheets.batchUpdate(spreadsheetId, sheetUpdates);
+        if (extraRows.length > 0) {
+          await sheets.appendRows(spreadsheetId, `'${tab}'`, extraRows);
+          extraRowsTotal += extraRows.length;
+        }
+        saveProgress(progress);
+        process.stdout.write(`\r   재시도: ${bi+1}/${skippedBatches.length} (성공 ${retriedSuccess}, 실패 ${retriedFail})  `);
+        await new Promise(r => setTimeout(r, REQ_INTERVAL_MS));
+      } catch (e: any) {
+        retriedFail += batch.length;
+        console.error(`\n  재시도도 실패: ${e.message?.slice(0, 80)}`);
+      }
+    }
+    console.log(`\n   재시도 완료: ${retriedSuccess}개 분류됨, ${retriedFail}개 여전히 실패 (다음 실행에서 시도)`);
   }
 
   // 통계
