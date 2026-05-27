@@ -290,6 +290,7 @@ async function main() {
     process.env.GOOGLE_AI_API_KEY,
     process.env.GOOGLE_AI_API_KEY_2,
     process.env.GOOGLE_AI_API_KEY_3,
+    process.env.GOOGLE_AI_API_KEY_4,
   ].filter(Boolean) as string[];
   console.log(`   API 키 ${apiKeys.length}개 준비`);
 
