@@ -99,7 +99,7 @@ async function main() {
     const chunk = records.slice(i, i + BATCH_SIZE);
     const { error } = await supabase
       .from('slack_messages')
-      .upsert(chunk, { onConflict: 'slack_permalink' });
+      .upsert(chunk, { onConflict: 'slack_permalink,title_number' });
     if (error) {
       console.error('\n❌', error);
       process.exit(1);
