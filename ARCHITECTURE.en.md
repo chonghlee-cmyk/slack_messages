@@ -2,7 +2,7 @@
 
 [한국어](./ARCHITECTURE.md) | 🌏 **English**
 
-> A system that automatically organizes Slack channel messages and collects them into Google Sheets
+> A system that automatically organizes Slack channel messages into Google Sheets + a web dashboard
 
 ---
 
@@ -13,9 +13,9 @@ Every day at 2 AM KST, automatically:
 1. **Fetches** yesterday's & today's messages/replies from Slack
 2. **Stores images separately** so they can be viewed anywhere
 3. **Auto-classifies with AI** to tag the issue type and identify which title it belongs to
-4. **Organizes everything** in Google Sheets
+4. **Organizes everything** in Google Sheets + Supabase + web dashboard
 
-→ When you come to work, neatly organized data is already in your sheet ✨
+→ When you come to work, neatly organized data is already in your sheet and dashboard ✨
 
 ---
 
@@ -26,18 +26,18 @@ flowchart LR
     A["💬 Slack Channel<br/>작품관련소통"] --> B["✨ Auto Pipeline"]
     B --> C["📋 Google Sheets<br/>(humans view & edit)"]
     C --> D["🗄 Supabase<br/>(DB + image storage)"]
-    D --> E["📈 Dashboard<br/>(coming soon)"]
+    D --> E["📈 Web Dashboard<br/>(toomics-dashboard.vercel.app)"]
 
     style A fill:#4A154B,color:#fff
     style C fill:#0F9D58,color:#fff
     style D fill:#3ECF8E,color:#fff
-    style E fill:#FFA500,color:#fff
+    style E fill:#000,color:#fff
 ```
 
 **Role of each layer:**
 - **Google Sheets** — Workspace where humans view, edit, and review
 - **Supabase** — Data warehouse for the dashboard (fast queries, image hosting)
-- **Dashboard** — Search/filter/visualization UI
+- **Dashboard** — Search/filter/visualization UI (supports ~50 concurrent users)
 
 ---
 
@@ -62,13 +62,14 @@ flowchart LR
 flowchart LR
     A["Slack image"] --> B["Download"]
     B --> C["Convert to WebP<br/>(-88% size)"]
-    C --> D["Upload to Supabase"]
+    C --> D["Upload to Supabase<br/>(30-day cache)"]
     D --> E["New link in sheet"]
 ```
 
 - Slack images require login → **can't be displayed on dashboard**
 - So we convert them to **public links** and store separately
-- Compressed **88%** (910MB → 103MB)
+- Compressed **88%** (910MB → 105MB)
+- **30-day browser cache** — same image isn't re-downloaded (saves egress)
 
 ### Step 3 — AI Auto-Classification
 
@@ -85,6 +86,8 @@ flowchart LR
 - AI reads each message and **classifies the issue type** (8 categories)
 - **Extracts title number/name** and matches against title database
 - Handles typos automatically (e.g., `8731 부녀회장` → DB has `8730 부녀회장` → corrected)
+- **Multi-title mentions**: When one message references multiple titles, **a separate row is created per title** (e.g., "한지붕 아래 + 두근두근" → 2 rows)
+- **Language variant matching**: `한지붕 아래`, `한지붕 아래[영어 전용]`, `한지붕 아래[프랑스어 전용]` are treated as the same title group → rows duplicated for each variant
 
 ### Step 4 — Sync to Supabase DB
 
@@ -98,6 +101,29 @@ flowchart LR
 - Also syncs 2,009 titles to a separate table
 - **14,000 rows synced in ~7 seconds**
 - Dashboard queries **Supabase instead of Sheets** → much faster
+
+---
+
+## 📈 Web Dashboard
+
+🔗 **https://toomics-dashboard.vercel.app**
+
+```mermaid
+flowchart LR
+    A["Work list<br/>(search/filter)"] --> B["Work detail"]
+    B --> C["Per-language info<br/>(PT/EN/ES/...)"]
+    B --> D["Manuscript revisions"]
+    B --> E["Slack messages<br/>(category groups)"]
+    B --> F["Per-language memos"]
+```
+
+**Key features:**
+- 🔍 **Work search** — Auto Korean/English conversion, filters by status/genre/platform
+- 📊 **Per-language info** — 9 language tabs (PT/EN/ES/IT/DE/FR/TC/JP/TH)
+- 💬 **Slack messages** — Grouped by category, threaded reply view
+- 📷 **Click-to-load images** — Just shows "N images" text by default, downloads only on click (egress savings)
+- 📝 **Per-language memos** — Internal team comments (CRUD)
+- ⭐ **Favorites** — Mark frequently viewed items
 
 ---
 
@@ -121,6 +147,8 @@ flowchart LR
 | **Title Number** | Auto-extracted | `8730` |
 | **Title Name** | Auto-extracted | `부녀회장` |
 | **Title Match** | Confidence | `Exact` / `Name match` / `Similar` / `None` |
+
+> 💡 **Multi-title messages**: When one message mentions multiple titles, additional rows are auto-generated with identical content but different title numbers. All searchable per title on the dashboard.
 
 ---
 
@@ -159,9 +187,9 @@ flowchart LR
 | Total rows | **14,346** |
 | Human messages | 2,767 |
 | Human replies | 11,579 |
-| Images | 2,519 files (103 MB) |
+| Images | 2,527 files (105 MB, WebP) |
 | Title DB | 2,009 titles |
-| AI classified | 3,332 (rest expected next week) |
+| AI classification | ~4,000/day (within Gemini free tier) |
 
 ---
 
@@ -171,8 +199,9 @@ flowchart LR
 - Slack API
 - Google Sheets
 - Supabase Storage (1GB free, currently 10% used)
-- Google Gemini AI (within free tier)
+- Google Gemini AI (within free tier, 3-key rotation)
 - GitHub Actions (free automated execution)
+- Vercel (dashboard hosting)
 
 ---
 
@@ -184,8 +213,8 @@ flowchart TB
     B --> C["1️⃣ Fetch messages<br/>(yesterday+today)"]
     C --> D["2️⃣ Process images"]
     D --> E["3️⃣ AI classification"]
-    E --> F["✅ Sheet updated"]
-    F --> G["📧 Done!"]
+    E --> F["4️⃣ Sync to Supabase"]
+    F --> G["✅ Dashboard auto-updates"]
 ```
 
 - Runs in the **cloud** even when your computer is off
@@ -196,16 +225,17 @@ flowchart TB
 
 ## 💡 Next Steps
 
-- [ ] Finish AI classification (remaining 11,000)
-- [ ] **Build dashboard** — search/filter/visualize without opening the sheet
+- [x] ~~Finish AI classification~~ (in progress)
+- [x] ~~Build dashboard~~ → **Done** (https://toomics-dashboard.vercel.app)
 - [ ] Title-level issue trend visualization
 - [ ] Auto-alerts (for specific issue types)
+- [ ] Add more Slack channels (currently 1 → multiple)
 
 ---
 
 ## ❓ FAQ
 
-**Q. When do new messages appear in the sheet?**
+**Q. When do new messages appear in the sheet/dashboard?**
 → Automatically at 2 AM KST daily. Manual trigger available if needed urgently.
 
 **Q. Why don't I see bot notifications in the sheet?**
@@ -219,6 +249,12 @@ flowchart TB
 
 **Q. Images suddenly stopped showing. Why?**
 → Supabase free tier is capped at 1GB. Currently at 10% — plenty of room.
+
+**Q. Why do I have to click to view images on the dashboard?**
+→ Intentional. To save free-tier bandwidth (5GB/month egress), images load only on click. Once viewed, images are browser-cached for 30 days.
+
+**Q. Why is the same message appearing twice?**
+→ If a message mentions multiple titles, we create a separate row per title. Same content, different title number.
 
 ---
 
