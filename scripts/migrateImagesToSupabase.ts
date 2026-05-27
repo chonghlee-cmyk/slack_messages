@@ -138,6 +138,7 @@ async function main() {
           .upload(key, webp, {
             contentType: 'image/webp',
             upsert: true,
+            cacheControl: '2592000', // 30일 (브라우저/CDN 캐시 → egress 절약)
           });
         if (error) throw error;
 
