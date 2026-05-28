@@ -44,8 +44,10 @@ export class SheetsWriter {
         'Loaded existing permalink keys'
       );
 
-      // 안전 체크: 행 수와 permalink 수 차이가 큰 경우 (10% 이상) abort
-      if (nonHeaderRowCount > 100 && keys.size < nonHeaderRowCount * 0.9) {
+      // 안전 체크: permalink 수가 행 수의 50% 미만일 때만 abort
+      // (다중 작품 매칭으로 같은 permalink가 여러 행에 나타날 수 있어 임계값을 낮춤.
+      //  단, 원래 막으려던 케이스 — GA 환경에서 14k 중 6.8k 만 로드되던 47% 손실 — 은 여전히 잡힘)
+      if (nonHeaderRowCount > 100 && keys.size < nonHeaderRowCount * 0.5) {
         throw new Error(
           `SAFETY: existing keys (${keys.size}) much less than rows (${nonHeaderRowCount}). ` +
           `Aborting to prevent duplicates. Sheet read may be incomplete.`
