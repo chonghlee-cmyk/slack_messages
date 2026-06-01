@@ -1,6 +1,6 @@
 # 📡 Slack HUB
 
-🌏 **한국어** | [English](./ARCHITECTURE.en.md)
+🌏 **한국어** | [English](./ARCHITECTURE.en.md) | [Confluence (KR)](./ARCHITECTURE.confluence.md) | [Confluence (EN)](./ARCHITECTURE.en.confluence.md)
 
 > Slack 채널의 메시지를 자동으로 정리해서 Google Sheets + 웹 대시보드로 보여주는 시스템
 
@@ -199,7 +199,7 @@ flowchart LR
 - Slack API
 - Google Sheets
 - Supabase Storage (1GB 무료, 현재 10% 사용)
-- Google Gemini AI (무료 한도 내, 키 3개 로테이션)
+- Google Gemini AI (무료 한도 내, 키 4개 로테이션)
 - GitHub Actions (자동 실행 무료)
 - Vercel (대시보드 호스팅)
 
@@ -209,7 +209,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    A["⏰ 매일 새벽 2시"] --> B["GitHub Actions<br/>자동 실행"]
+    A["⏰ 매일 새벽 2시 & 오후 6시"] --> B["GitHub Actions<br/>자동 실행"]
     B --> C["1️⃣ 메시지 수집<br/>(어제+오늘)"]
     C --> D["2️⃣ 이미지 처리"]
     D --> E["3️⃣ AI 분류"]
@@ -236,7 +236,7 @@ flowchart TB
 ## ❓ 자주 묻는 질문
 
 **Q. 새 메시지는 언제 시트/대시보드에 들어와요?**
-→ 매일 새벽 2시 자동으로. 즉시 필요하면 수동 실행 가능.
+→ 매일 새벽 2시 & 오후 6시 자동으로. 즉시 필요하면 수동 실행 가능.
 
 **Q. 봇 알림이 시트에 안 보여요?**
 → 봇 메시지는 자동으로 제외함 (`B098BGM0L15` 같은 자동 알림은 사람 대화 아니라서).

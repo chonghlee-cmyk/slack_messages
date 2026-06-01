@@ -1,8 +1,9 @@
 # 📡 Slack HUB
 
-[한국어](./ARCHITECTURE.md) | 🌏 **English** | [Confluence (KR)](./ARCHITECTURE.confluence.md) | [Confluence (EN)](./ARCHITECTURE.en.confluence.md)
-
 > A system that automatically organizes Slack channel messages into Google Sheets + a web dashboard
+
+🔗 **Dashboard:** https://toomics-dashboard.vercel.app
+📁 **GitHub:** https://github.com/chonghlee-cmyk/slack_messages
 
 ---
 
@@ -21,23 +22,22 @@ Every day at 2 AM KST, automatically:
 
 ## 📊 The Big Picture
 
-```mermaid
-flowchart LR
-    A["💬 Slack Channel<br/>작품관련소통"] --> B["✨ Auto Pipeline"]
-    B --> C["📋 Google Sheets<br/>(humans view & edit)"]
-    C --> D["🗄 Supabase<br/>(DB + image storage)"]
-    D --> E["📈 Web Dashboard<br/>(toomics-dashboard.vercel.app)"]
-
-    style A fill:#4A154B,color:#fff
-    style C fill:#0F9D58,color:#fff
-    style D fill:#3ECF8E,color:#fff
-    style E fill:#000,color:#fff
+```
+┌─────────────────┐     ┌──────────────┐     ┌────────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  💬 Slack       │ ──▶ │ ✨ Auto      │ ──▶ │ 📋 Google      │ ──▶ │ 🗄 Supabase  │ ──▶ │ 📈 Dashboard     │
+│  Channel        │     │  Pipeline    │     │   Sheets       │     │ (DB + Image) │     │ (Vercel hosted)  │
+│ 작품관련소통    │     │ (GitHub      │     │ (human review) │     │              │     │                  │
+│                 │     │  Actions)    │     │                │     │              │     │                  │
+└─────────────────┘     └──────────────┘     └────────────────┘     └──────────────┘     └──────────────────┘
 ```
 
 **Role of each layer:**
-- **Google Sheets** — Workspace where humans view, edit, and review
-- **Supabase** — Data warehouse for the dashboard (fast queries, image hosting)
-- **Dashboard** — Search/filter/visualization UI (supports ~50 concurrent users)
+
+| Layer | Role |
+|-------|------|
+| **Google Sheets** | Workspace where humans view, edit, and review |
+| **Supabase** | Data warehouse for the dashboard (fast queries, image hosting) |
+| **Dashboard** | Search/filter/visualization UI (supports ~50 concurrent users) |
 
 ---
 
@@ -45,11 +45,8 @@ flowchart LR
 
 ### Step 1 — Fetch Messages
 
-```mermaid
-flowchart LR
-    A["Slack channel<br/>yesterday~today"] --> B["Filter bot alerts<br/>(humans only)"]
-    B --> C["Format name/date/time"]
-    C --> D["Append to sheet"]
+```
+Slack Channel (yesterday~today) → Filter bot alerts → Format name/date/time → Append to sheet
 ```
 
 - Only collects **human-written messages and replies** (auto bot alerts filtered out)
@@ -58,12 +55,8 @@ flowchart LR
 
 ### Step 2 — Process Images
 
-```mermaid
-flowchart LR
-    A["Slack image"] --> B["Download"]
-    B --> C["Convert to WebP<br/>(-88% size)"]
-    C --> D["Upload to Supabase<br/>(30-day cache)"]
-    D --> E["New link in sheet"]
+```
+Slack image → Download → Convert to WebP (-88%) → Upload to Supabase (30-day cache) → New link in sheet
 ```
 
 - Slack images require login → **can't be displayed on dashboard**
@@ -73,14 +66,8 @@ flowchart LR
 
 ### Step 3 — AI Auto-Classification
 
-```mermaid
-flowchart LR
-    A["Message text"] --> B["AI analysis"]
-    B --> C["Classify issue type<br/>(Manuscript/Schedule/Author etc)"]
-    B --> D["Find title<br/>(number + name)"]
-    D --> E["Match against title DB"]
-    C --> F["Add to sheet"]
-    E --> F
+```
+Message text → AI analysis → Classify issue type + Find title → Match against title DB → Add to sheet
 ```
 
 - AI reads each message and **classifies the issue type** (8 categories)
@@ -91,10 +78,8 @@ flowchart LR
 
 ### Step 4 — Sync to Supabase DB
 
-```mermaid
-flowchart LR
-    A["Google Sheets<br/>(complete data)"] --> B["Upload to Supabase<br/>tables (upsert)"]
-    B --> C["Fast queries from<br/>dashboard"]
+```
+Google Sheets (complete data) → Upload to Supabase tables (upsert) → Fast queries from dashboard
 ```
 
 - Copies all sheet rows (messages, classifications, title matches) to **Supabase DB**
@@ -108,22 +93,25 @@ flowchart LR
 
 🔗 **https://toomics-dashboard.vercel.app**
 
-```mermaid
-flowchart LR
-    A["Work list<br/>(search/filter)"] --> B["Work detail"]
-    B --> C["Per-language info<br/>(PT/EN/ES/...)"]
-    B --> D["Manuscript revisions"]
-    B --> E["Slack messages<br/>(category groups)"]
-    B --> F["Per-language memos"]
+```
+Work List (search/filter) ─┐
+                           ▼
+                    Work Detail ─┬─▶ Per-language info (PT/EN/ES/IT/DE/FR/TC/JP/TH)
+                                 ├─▶ Manuscript revisions
+                                 ├─▶ Slack messages (category groups)
+                                 └─▶ Per-language memos
 ```
 
 **Key features:**
-- 🔍 **Work search** — Auto Korean/English conversion, filters by status/genre/platform
-- 📊 **Per-language info** — 9 language tabs (PT/EN/ES/IT/DE/FR/TC/JP/TH)
-- 💬 **Slack messages** — Grouped by category, threaded reply view
-- 📷 **Click-to-load images** — Just shows "N images" text by default, downloads only on click (egress savings)
-- 📝 **Per-language memos** — Internal team comments (CRUD)
-- ⭐ **Favorites** — Mark frequently viewed items
+
+| Feature | Description |
+|---------|-------------|
+| 🔍 **Work search** | Auto Korean/English conversion, filters by status/genre/platform |
+| 📊 **Per-language info** | 9 language tabs (PT/EN/ES/IT/DE/FR/TC/JP/TH) |
+| 💬 **Slack messages** | Grouped by category, threaded reply view |
+| 📷 **Click-to-load images** | Just shows "N images" text by default, downloads only on click (egress savings) |
+| 📝 **Per-language memos** | Internal team comments (CRUD) |
+| ⭐ **Favorites** | Mark frequently viewed items |
 
 ---
 
@@ -196,6 +184,7 @@ flowchart LR
 ## 🆓 Cost
 
 **Completely free** to operate:
+
 - Slack API
 - Google Sheets
 - Supabase Storage (1GB free, currently 10% used)
@@ -207,14 +196,20 @@ flowchart LR
 
 ## 🔄 How does it run daily?
 
-```mermaid
-flowchart TB
-    A["⏰ Daily at 2 AM & 6 PM KST"] --> B["GitHub Actions<br/>auto-runs"]
-    B --> C["1️⃣ Fetch messages<br/>(yesterday+today)"]
-    C --> D["2️⃣ Process images"]
-    D --> E["3️⃣ AI classification"]
-    E --> F["4️⃣ Sync to Supabase"]
-    F --> G["✅ Dashboard auto-updates"]
+```
+⏰ Daily at 2 AM & 6 PM KST
+       ↓
+🔄 GitHub Actions auto-runs
+       ↓
+1️⃣ Fetch messages (yesterday+today)
+       ↓
+2️⃣ Process images
+       ↓
+3️⃣ AI classification
+       ↓
+4️⃣ Sync to Supabase
+       ↓
+✅ Dashboard auto-updates
 ```
 
 - Runs in the **cloud** even when your computer is off
@@ -225,35 +220,42 @@ flowchart TB
 
 ## 💡 Next Steps
 
-- [x] ~~Finish AI classification~~ (in progress)
-- [x] ~~Build dashboard~~ → **Done** (https://toomics-dashboard.vercel.app)
-- [ ] Title-level issue trend visualization
-- [ ] Auto-alerts (for specific issue types)
-- [ ] Add more Slack channels (currently 1 → multiple)
+- ✅ ~~Finish AI classification~~ (in progress)
+- ✅ ~~Build dashboard~~ → **Done** (https://toomics-dashboard.vercel.app)
+- ⬜ Title-level issue trend visualization
+- ⬜ Auto-alerts (for specific issue types)
+- ⬜ Add more Slack channels (currently 1 → multiple)
 
 ---
 
 ## ❓ FAQ
 
 **Q. When do new messages appear in the sheet/dashboard?**
+
 → Automatically at 2 AM and 6 PM KST daily. Manual trigger available if needed urgently.
 
 **Q. Why don't I see bot notifications in the sheet?**
+
 → Bot messages (like `B098BGM0L15` auto-alerts) are filtered out since they're not human conversation.
 
 **Q. The AI got the classification wrong. What do I do?**
+
 → You can edit directly in the sheet. Future automated runs won't overwrite your edits.
 
 **Q. How does the title DB get updated?**
+
 → The "작품정보" tab is linked to an external DB and always stays in sync automatically.
 
 **Q. Images suddenly stopped showing. Why?**
+
 → Supabase free tier is capped at 1GB. Currently at 10% — plenty of room.
 
 **Q. Why do I have to click to view images on the dashboard?**
+
 → Intentional. To save free-tier bandwidth (5GB/month egress), images load only on click. Once viewed, images are browser-cached for 30 days.
 
 **Q. Why is the same message appearing twice?**
+
 → If a message mentions multiple titles, we create a separate row per title. Same content, different title number.
 
 ---
