@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "google-auth-library": "^9.15.1",
     "@google/generative-ai": "^0.24.1",
     "@slack/web-api": "^7.3.4",
     "@supabase/supabase-js": "^2.45.4",
