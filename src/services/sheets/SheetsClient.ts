@@ -23,7 +23,12 @@ export class SheetsClient {
 
     if (keyBase64) {
       const json = Buffer.from(keyBase64, 'base64').toString('utf-8');
-      credentials = JSON.parse(json);
+      const parsed = JSON.parse(json);
+      // 레거시 토큰 엔드포인트(www.googleapis.com/oauth2/v4/token) → 최신 엔드포인트로 교체
+      if (typeof parsed.token_uri === 'string' && parsed.token_uri.includes('www.googleapis.com')) {
+        parsed.token_uri = 'https://oauth2.googleapis.com/token';
+      }
+      credentials = parsed;
       logger.debug('Google auth: using base64 key');
     } else if (keyPath) {
       const resolved = require('path').resolve(keyPath);
