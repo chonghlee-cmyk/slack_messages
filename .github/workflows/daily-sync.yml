@@ -79,6 +79,7 @@ jobs:
           GOOGLE_SHEETS_OUTPUT_TAB: ${{ vars.GOOGLE_SHEETS_OUTPUT_TAB || 'Slack' }}
           GOOGLE_SHEETS_LOG_TAB: ${{ vars.GOOGLE_SHEETS_LOG_TAB || 'Slack 로그' }}
           SYNC_INITIAL_LOOKBACK_DAYS: ${{ vars.SYNC_INITIAL_LOOKBACK_DAYS || '0' }}
+          SYNC_INCREMENTAL_LOOKBACK_DAYS: ${{ vars.SYNC_INCREMENTAL_LOOKBACK_DAYS || '30' }}
           FORCE_FULL_SYNC: ${{ inputs.force_full_sync || 'false' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           LOG_FORMAT: json

@@ -19,6 +19,13 @@ export interface EngineConfig {
   excludedUserIds: string[];
   /** 첫 실행 시 과거 몇 일치를 가져올지 (default: 90) */
   initialLookbackDays: number;
+  /**
+   * 증분(매일) 실행 시 며칠 전부터 되돌아볼지 (default: 30)
+   * 오래된 스레드에 뒤늦게 달린 답글을 놓치지 않으려면 넉넉히 잡는다.
+   * (Slack history의 oldest는 부모 메시지 기준이라, 부모가 이 창 안에
+   *  들어와야 그 스레드의 새 답글까지 수집된다)
+   */
+  incrementalLookbackDays: number;
 }
 
 interface ChannelSyncState {
@@ -77,9 +84,12 @@ export class SyncEngine {
       const channelState = state[channelId];
 
       if (channelState?.lastSyncedAt) {
-        // 매일 실행: 어제(D-1)부터 수집해 누락 방지
-        afterDate = subtractDays(new Date(), 1);
-        logger.info({ afterDate: afterDate.toISOString() }, 'Incremental sync: collecting from yesterday');
+        // 매일 실행: 최근 N일부터 수집 (오래된 스레드의 새 답글 누락 방지)
+        afterDate = subtractDays(new Date(), this.config.incrementalLookbackDays);
+        logger.info(
+          { afterDate: afterDate.toISOString(), days: this.config.incrementalLookbackDays },
+          'Incremental sync: collecting from last N days'
+        );
       } else {
         // 첫 실행: 0이면 전체 히스토리, 아니면 지정된 일수만큼
         if (this.config.initialLookbackDays > 0) {
