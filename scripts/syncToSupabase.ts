@@ -41,6 +41,8 @@ async function main() {
   const tab = process.env.GOOGLE_SHEETS_OUTPUT_TAB ?? 'Slack';
 
   // === 1) 작품 DB 동기화 ===
+  // titles 테이블은 신 스키마(2026-06 개편)에서 제거된 레거시 → 없어도
+  // slack_messages 동기화(2번)는 반드시 계속되어야 하므로 실패를 비치명적으로 처리
   console.log('1. 작품 DB 동기화 중...');
   const titleRows = await sheets.getRange(spreadsheetId, `'작품정보'!A:B`);
   const titles = titleRows.slice(1)
@@ -48,11 +50,16 @@ async function main() {
     .map(r => ({ number: r[0].trim(), name: r[1].trim() }));
   console.log(`   ${titles.length}개 작품`);
 
+  let titlesSynced = 0;
   for (let i = 0; i < titles.length; i += BATCH_SIZE) {
     const chunk = titles.slice(i, i + BATCH_SIZE);
     const { error } = await supabase.from('titles').upsert(chunk, { onConflict: 'number' });
-    if (error) { console.error(error); process.exit(1); }
-    process.stdout.write(`\r   업로드: ${Math.min(i+BATCH_SIZE, titles.length)}/${titles.length}`);
+    if (error) {
+      console.warn(`\n⚠️  titles 동기화 건너뜀 (${error.code ?? '?'}: ${error.message}) — slack_messages 동기화는 계속합니다`);
+      break;
+    }
+    titlesSynced = Math.min(i + BATCH_SIZE, titles.length);
+    process.stdout.write(`\r   업로드: ${titlesSynced}/${titles.length}`);
   }
   console.log();
 
@@ -118,7 +125,7 @@ async function main() {
 
   console.log('\n═══════════════════════════════════════');
   console.log(`✅ 동기화 완료`);
-  console.log(`   작품: ${titles.length}`);
+  console.log(`   작품(titles): ${titlesSynced}/${titles.length}${titlesSynced < titles.length ? ' (건너뜀)' : ''}`);
   console.log(`   메시지/답글: ${records.length}`);
   console.log(`   소요: ${((Date.now()-start)/1000).toFixed(1)}초`);
   console.log('═══════════════════════════════════════');
