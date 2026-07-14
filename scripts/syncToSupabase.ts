@@ -9,7 +9,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { createClient } from '@supabase/supabase-js';
+import { createSupabaseClient } from '../src/services/supabase/client';
 import { SheetsClient } from '../src/services/sheets/SheetsClient';
 
 const BATCH_SIZE = 500;
@@ -35,7 +35,7 @@ function parseNumberOrNull(s: string): number | null {
 }
 
 async function main() {
-  const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+  const supabase = createSupabaseClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
   const sheets = new SheetsClient();
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID!;
   const tab = process.env.GOOGLE_SHEETS_OUTPUT_TAB ?? 'Slack';

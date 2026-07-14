@@ -13,7 +13,7 @@ dotenv.config();
 
 import axios from 'axios';
 import sharp from 'sharp';
-import { createClient } from '@supabase/supabase-js';
+import { createSupabaseClient } from '../src/services/supabase/client';
 import { SheetsClient } from '../src/services/sheets/SheetsClient';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -70,7 +70,7 @@ async function main() {
     process.exit(1);
   }
 
-  const supabase = createClient(supabaseUrl, supabaseKey);
+  const supabase = createSupabaseClient(supabaseUrl, supabaseKey);
   const sheets = new SheetsClient();
   const progress = loadProgress();
 
