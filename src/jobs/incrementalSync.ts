@@ -22,7 +22,6 @@ async function main() {
     logTab: process.env.GOOGLE_SHEETS_LOG_TAB ?? 'Slack 로그',
     excludedUserIds,
     initialLookbackDays: Number(process.env.SYNC_INITIAL_LOOKBACK_DAYS ?? '0'),
-    incrementalLookbackDays: Number(process.env.SYNC_INCREMENTAL_LOOKBACK_DAYS ?? '30'),
   });
 
   await engine.run({

@@ -10,6 +10,9 @@ import { subtractDays } from '../utils/dateUtils';
 
 const STATE_FILE = path.resolve(process.cwd(), 'data', 'sync-state.json');
 
+/** 증분 실행 시 마지막 동기화 시각에서 이만큼 더 과거부터 스레드를 재스캔 (안전 버퍼) */
+const REPLY_RESCAN_BUFFER_DAYS = 2;
+
 export interface EngineConfig {
   slackToken: string;
   spreadsheetId: string;
@@ -17,15 +20,8 @@ export interface EngineConfig {
   outputTab: string;
   logTab?: string;
   excludedUserIds: string[];
-  /** 첫 실행 시 과거 몇 일치를 가져올지 (default: 90) */
+  /** 첫 실행 시 과거 몇 일치의 스레드 답글을 가져올지 (0=전체, default: 0) */
   initialLookbackDays: number;
-  /**
-   * 증분(매일) 실행 시 며칠 전부터 되돌아볼지 (default: 30)
-   * 오래된 스레드에 뒤늦게 달린 답글을 놓치지 않으려면 넉넉히 잡는다.
-   * (Slack history의 oldest는 부모 메시지 기준이라, 부모가 이 창 안에
-   *  들어와야 그 스레드의 새 답글까지 수집된다)
-   */
-  incrementalLookbackDays: number;
 }
 
 interface ChannelSyncState {
@@ -37,7 +33,7 @@ interface ChannelSyncState {
 type SyncStateFile = Record<string, ChannelSyncState>;
 
 export interface SyncJobOptions {
-  /** true 이면 afterDate 없이 전체 수집 */
+  /** true 이면 모든 스레드의 답글을 재수집 (latest_reply 게이팅 없이 전체) */
   forceFullSync?: boolean;
   /** 실제로 시트에 쓰지 않고 로그만 */
   dryRun?: boolean;
@@ -73,40 +69,38 @@ export class SyncEngine {
     await this.sheetsWriter.ensureHeader(spreadsheetId, outputTab);
     const existingKeys = await this.sheetsWriter.loadExistingKeys(spreadsheetId, outputTab);
 
-    // 증분 범위 계산
-    // - 전체 재수집: afterDate 없음
-    // - 증분: 오늘 기준 어제부터 (D-1) — 오늘 sync 시 어제+오늘 모두 커버
-    // - 첫 실행(state 없음): initialLookbackDays 일 전부터
-    let afterDate: Date | undefined;
+    // 답글 재수집 임계 시각 계산
+    // 부모 메시지 나열은 항상 전체이므로, 여기서는 "어떤 스레드의 답글을
+    // 다시 긁을지"만 정한다 (latest_reply 기반 게이팅).
+    // - 전체 재수집(forceFullSync): 임계 없음 → 모든 스레드 답글 수집
+    // - 증분: 마지막 성공 동기화 시각 − 버퍼(2일). 그 이후 활동한 스레드만 재수집.
+    //   (부분 실패/시계 오차 대비 버퍼. 중복은 permalink dedup이 흡수)
+    // - 첫 실행: initialLookbackDays>0이면 그 기간, 0이면 전체
+    let replyThreshold: Date | undefined;
 
     if (!options.forceFullSync) {
       const state = this.loadSyncState();
       const channelState = state[channelId];
 
       if (channelState?.lastSyncedAt) {
-        // 매일 실행: 최근 N일부터 수집 (오래된 스레드의 새 답글 누락 방지)
-        afterDate = subtractDays(new Date(), this.config.incrementalLookbackDays);
+        replyThreshold = subtractDays(new Date(channelState.lastSyncedAt), REPLY_RESCAN_BUFFER_DAYS);
         logger.info(
-          { afterDate: afterDate.toISOString(), days: this.config.incrementalLookbackDays },
-          'Incremental sync: collecting from last N days'
+          { replyThreshold: replyThreshold.toISOString() },
+          'Incremental sync: rescanning threads active since last sync'
+        );
+      } else if (this.config.initialLookbackDays > 0) {
+        replyThreshold = subtractDays(new Date(), this.config.initialLookbackDays);
+        logger.info(
+          { replyThreshold: replyThreshold.toISOString(), days: this.config.initialLookbackDays },
+          'First run: collecting replies within initial lookback'
         );
       } else {
-        // 첫 실행: 0이면 전체 히스토리, 아니면 지정된 일수만큼
-        if (this.config.initialLookbackDays > 0) {
-          afterDate = subtractDays(new Date(), this.config.initialLookbackDays);
-          logger.info(
-            { afterDate: afterDate.toISOString(), days: this.config.initialLookbackDays },
-            'First run: collecting initial lookback'
-          );
-        } else {
-          afterDate = undefined;
-          logger.info('First run: collecting full channel history (no date limit)');
-        }
+        logger.info('First run: collecting all thread replies (no limit)');
       }
     }
 
     // 수집
-    const result = await collector.collectChannel(channelId, { afterDate });
+    const result = await collector.collectChannel(channelId, { replyThreshold });
 
     // dedup: permalink 기준
     const newMessages = result.messages.filter(m => {

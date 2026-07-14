@@ -51,6 +51,8 @@ export interface SlackApiMessage {
   thread_ts?: string;
   reply_count?: number;
   reply_users_count?: number;
+  /** 스레드 부모 메시지에만 존재: 가장 최근 답글의 ts (초.마이크로초 문자열) */
+  latest_reply?: string;
   team?: string;
   files?: SlackApiFile[];
 }
